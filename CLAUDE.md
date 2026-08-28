@@ -135,7 +135,9 @@ Examples:
 
 ## ENVIRONMENT VARIABLES
 
-Never hardcode. Always use env vars. Document every var in ENV_VARS.md.
+Never hardcode. Always use env vars. `ENV_VARS.md` does not exist in this repo (verified
+2026-08-28 — see docs/PLMKR_TRUSTED_STATE_LEDGER_2026-08-28.md); `.env.example` is the current
+source of documented vars.
 Never test with prod keys during development.
 Rotate keys immediately if exposed.
 
@@ -148,28 +150,60 @@ Required env vars for this backend:
 - TWILIO_PHONE_NUMBER
 - STRIPE_SECRET_KEY
 - STRIPE_WEBHOOK_SECRET
-- OPENAI_API_KEY (backup TTS only)
+- OPENAI_API_KEY (usage unresolved: verified 2026-08-28 that no OpenAI-TTS fallback code exists
+  in main.py — Kokoro local ONNX is the primary TTS engine, ElevenLabs is the coded fallback)
 
 ---
 
 ## CURRENT BUILD STATUS — BACKEND
 
-Working:
-- FastAPI on Railway — live and auto-deploying
-- 16 active agents with skills, greetings, voice routing
-- ElevenLabs TTS — paid Starter account, not flagged
-- Cloudinary photo redirect — uses agent first name at root level
-- Stripe billing — checkout + webhook handler
-- SQLite memory.db — conversation history
+**Evidence baseline: `docs/PLMKR_TRUSTED_STATE_LEDGER_2026-08-28.md`** (verified 2026-08-28 against
+main @ 54ea8e9, re-confirmed 2026-08-28 follow-up @ 288644d). This section summarizes that ledger;
+consult it directly for file:line evidence before relying on any claim below. Distinguish
+*implemented in code* from *runtime-verified* from *production-verified* — code existing does not
+mean it has been exercised end-to-end.
 
-Broken / Not Built:
-- Voice mapping: app not passing agent.voice correctly (fix in frontend)
-- Agent handoff: context lost between agents
-- Gmail OAuth: not started
-- sendEmail() function: not started
-- All databases (curators, press, venues): not started
-- Function calling on agents: not started
-- Twilio: dev bypass active — auth token invalid format
+Implemented in code (verified 2026-08-28):
+- FastAPI on Railway — Railway CLI confirms this repo is linked to project `handsome-strength`,
+  environment `production`; not re-curled/re-deployed this session, so "live and auto-deploying"
+  is not re-confirmed at runtime.
+- **44 coded agents** (main.py `AGENTS` list, 1:1 with `skills/maestro-*` dirs) — not 16.
+- TTS: **Kokoro (local ONNX) is the primary engine; ElevenLabs is the coded fallback.** No
+  OpenAI-TTS fallback code exists despite being documented in `.env.example`. Voice output
+  quality/latency not runtime-verified.
+- Stripe billing: checkout + signed-webhook-verification code exists and is wired. Live Stripe
+  calls, security review, and production behavior not exercised this session (no external calls
+  made).
+- Gmail: `sendEmail()` exists and is wired to the real Gmail API (`pitch_service.py`) — not "not
+  started." OAuth flow and end-to-end delivery not runtime-verified this session.
+- Cloudinary photo redirect — uses agent first name at root level (not re-verified this session).
+- Persistence is dual-mode by design: SQLite (`memory.db`, local dev fallback) **and** PostgreSQL
+  via `DATABASE_URL` (Railway) — not either/or.
+
+Unresolved / not runtime-verified this session:
+- Voice mapping, voice delay, hangup handling, and Phase 0's `CallScreen.js` frontend fix: **no
+  frontend repository or `CallScreen.js` file was found anywhere in the audited environment.**
+  This is not confirmed fixed or broken — it is unlocatable, so treat as unresolved.
+  `~/Desktop/maestro` is a stale duplicate clone of *this backend*, not a frontend; repo docs
+  (`docs/PHASE_4_FRONTEND_DEFERRED.md`) point PLMKR's mobile frontend at a separate, absent
+  repository/entity for the Phase 4 App Store work specifically — that doc does not establish
+  where the Phase 0 call-flow frontend lives.
+- Agent handoff context-passing: not re-verified this session.
+- Twilio: dev-bypass code exists and is guarded against production use on Railway; the
+  32-lowercase-hex `TWILIO_AUTH_TOKEN` format check is confirmed in code. Live SMS not tested.
+- All databases (curators, press, venues) and function calling on agents: not re-verified this
+  session — status as previously stated is unconfirmed either way.
+
+Test status (bounded evidence, 2026-08-28 — see ledger §9 for detail; do not treat as full-suite-passing):
+- 3,272 tests collected (`pytest --ignore=tests/integration --collect-only -q`).
+- 2,879 passed cleanly, then the process aborted (native `Fatal Python error: Aborted` during a
+  Kokoro-related `importlib.reload(main)`) before the remaining ~12% ran.
+- `tests/test_sync_agent_assess.py` run in isolation: 15 passed, no abort. Root cause of the
+  full-suite abort is **unresolved** — isolation passing narrows but does not determine it.
+
+Governance note: `docs/PLMKR_MASTER_NORTH_STAR.html` is untracked and has not been adopted into
+repository governance as of 2026-08-28. Treat its direction as proposed only — do not implement it
+without explicit founder sign-off.
 
 ---
 
@@ -204,4 +238,5 @@ Before closing every session:
 3. State ending credit balance
 4. Note what phase item is next
 
-Last updated: March 2026
+Last updated: March 2026 (CURRENT BUILD STATUS and ENVIRONMENT VARIABLES sections corrected
+2026-08-28 per docs/PLMKR_TRUSTED_STATE_LEDGER_2026-08-28.md; remainder of file unchanged)
