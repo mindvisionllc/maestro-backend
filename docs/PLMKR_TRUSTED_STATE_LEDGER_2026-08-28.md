@@ -210,15 +210,20 @@ out of this session's bounded scope). Evidence gathered:
   ```
   `main.py:623` is inside the Kokoro TTS init block (`get_kokoro()`, §4). The crash occurs while a
   test does `importlib.reload(main)` — this pattern (module-level reload of `main.py` to reset
-  process-global state between tests) recurs across the suite; the native ONNX/torch runtime
-  appears not to tolerate being re-initialized in-process repeatedly, eventually aborting the whole
-  interpreter (`timeout` then reports "the monitored command dumped core"). This reads as an
-  **environmental/test-harness fragility** (repeated native-library re-init under `importlib.reload`),
-  not a business-logic regression — every test that *did* run, ran clean. It was not diagnosed
-  further or fixed this session (out of scope: inspection only, and diagnosing a native crash
-  would require exploratory changes). This is evidence-worthy new information, distinct from the
-  previously known `test_r3x` `/data`-reload fragility noted in project memory — both point at the
-  same underlying pattern (module reload across a large test suite) but manifest differently.
+  process-global state between tests) recurs across the suite (`timeout` then reports "the
+  monitored command dumped core"). It was not diagnosed further or fixed in the original session
+  (out of scope there: inspection only).
+  **[2026-08-28 follow-up]** The suite process aborted during a Kokoro-related
+  `importlib.reload(main)` after 2,879 tests had passed. The targeted evidence available in this
+  session does not establish whether the cause is application logic, test isolation/order
+  dependence, native-library state, or another runtime interaction. A bounded reproduction was run
+  this follow-up session: `python3 -m pytest tests/test_sync_agent_assess.py -q` (the exact failing
+  test's file, run in isolation) → exit 0, `15 passed, 1 warning in 25.19s`, no abort.
+  The targeted test passed in isolation, so the abort was not reproduced by that command. This
+  narrows but does not determine the cause; an order-dependent or accumulated native-state
+  interaction remains possible. This is distinct from the previously known `test_r3x` `/data`-reload
+  fragility noted in project memory — both involve module reload across a large test suite, but no
+  causal link between the two has been established.
 - **Not run this session (deferred as external/paid-service-risk per session rules):**
   `tests/integration/` (documented as a separately-run subtree — conservatively deferred even though
   its `conftest.py` shows local-only fixtures, since the session brief calls for the *smallest*
@@ -245,8 +250,8 @@ out of this session's bounded scope). Evidence gathered:
    project's own documentation (`docs/PHASE_4_FRONTEND_DEFERRED.md`) states it lives in a separate,
    separately-owned repository (`~/Desktop/ReveNation/`) that is not present on this machine.
 6. This session's own test run of the documented safe command (`pytest --ignore=tests/integration -q`)
-   passed cleanly on 2,879 of 3,272 collected tests (88%, zero failures/errors) before an
-   environmental native-runtime crash during a Kokoro-related `importlib.reload(main)` — see §9.
+   passed cleanly on 2,879 of 3,272 collected tests (88%, zero failures/errors) before the process
+   aborted during a Kokoro-related `importlib.reload(main)` — cause not established; see §9.
 
 ---
 
