@@ -407,7 +407,14 @@ def _gmail_execute_with_retry(request, max_retries: int = 3, artist_id: str = "u
             raise
 
 
-async def send_email(artist_id: str, to: str, subject: str, body: str) -> dict:
+async def send_email(
+    artist_id: str,
+    to: str,
+    subject: str,
+    body: str,
+    *,
+    message_id_header: str | None = None,
+) -> dict:
     """
     Send a plain-text email via Gmail API on behalf of the artist.
     Returns {"message_id": ..., "thread_id": ..., "status": "sent"}.
@@ -418,6 +425,8 @@ async def send_email(artist_id: str, to: str, subject: str, body: str) -> dict:
     msg = email.mime.text.MIMEText(body, "plain", "utf-8")
     msg["to"]      = to
     msg["subject"] = subject
+    if message_id_header:
+        msg["Message-ID"] = message_id_header
     raw    = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     t0 = datetime.now(timezone.utc)
     result = _gmail_execute_with_retry(

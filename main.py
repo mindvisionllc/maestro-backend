@@ -1143,6 +1143,7 @@ import release_service  # noqa: E402  (module ref for Sage/release-strategist to
 import social_service  # noqa: E402  (module ref for Riley/social-manager tool_use handlers)
 import booking_service  # noqa: E402  (module ref for Avery/booking-agent tool_use handlers)
 import pr_service  # noqa: E402  (module ref for Quinn/pr-agent tool_use handlers)
+import execution_service  # noqa: E402  (durable supported provider operations)
 from pitch_service import router as _pitch_router, init_pitch_db, init_scheduler
 app.include_router(_pitch_router)
 
@@ -1155,6 +1156,10 @@ app.include_router(_booking_router)
 # ── Phase 3 — Social scheduling + weekly reports ───────────────────────────────
 from social_service import router as _social_router, init_social_db, init_report_scheduler
 app.include_router(_social_router)
+
+# ── Durable single-action execution ledger ────────────────────────────────────
+from execution_service import router as _execution_router, init_execution_db
+app.include_router(_execution_router)
 
 # ── Phase 4 — iOS backend foundation (push, app config, version check, IAP) ───
 from phase4_service import router as _phase4_router, init_phase4_db
@@ -1367,6 +1372,7 @@ init_scheduler()
 init_pr_db()
 init_booking_db()
 init_social_db()
+init_execution_db()
 init_report_scheduler()
 init_release_db()
 init_phase4_db()
