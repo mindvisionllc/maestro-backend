@@ -42,6 +42,7 @@ _BUFFER_REDIRECT_URI  = os.environ.get("BUFFER_REDIRECT_URI", "")
 _BUFFER_AUTH_URL      = "https://bufferapp.com/oauth2/authorize"
 _BUFFER_TOKEN_URL     = "https://api.bufferapp.com/1/oauth2/token.json"
 _BUFFER_POST_URL      = "https://api.bufferapp.com/1/updates/create.json"
+_BUFFER_PROFILES_URL  = "https://api.bufferapp.com/1/profiles.json"
 # R-26: feature flag for real Buffer HTTP client (BUFFER_LIVE=false default — safe)
 _BUFFER_API_KEY       = os.environ.get("BUFFER_API_KEY", "")
 _BUFFER_LIVE          = os.environ.get("BUFFER_LIVE", "false").lower() == "true"
@@ -444,6 +445,50 @@ async def buffer_callback(code: str, state: str):
 def buffer_status(artist_id: str):
     tokens = _load_buffer_tokens(artist_id)
     return {"connected": bool(tokens.get("access_token")), "artist_id": artist_id}
+
+
+async def _buffer_list_profiles(artist_id: str) -> list[dict]:
+    """Return Buffer profiles available to the artist's connected account."""
+    tokens = _load_buffer_tokens(artist_id)
+    access_token = tokens.get("access_token")
+    if not access_token:
+        raise BufferNotConnected(f"Artist {artist_id} has not connected Buffer")
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+        resp = await client.get(
+            _BUFFER_PROFILES_URL,
+            params={"access_token": access_token},
+        )
+
+    if resp.status_code != 200:
+        log.error("buffer_profiles_error", extra={
+            "event": "buffer_profiles_error",
+            "status": resp.status_code,
+            "body": resp.text[:200],
+        })
+        raise RuntimeError(f"Buffer API returned {resp.status_code}")
+
+    try:
+        data = resp.json()
+    except Exception:
+        raise RuntimeError("Buffer API returned non-JSON profile response")
+
+    if not isinstance(data, list):
+        raise RuntimeError("Buffer API returned invalid profile response")
+
+    return data
+
+
+@router.get("/api/buffer/profiles", tags=["buffer"])
+async def buffer_profiles(artist_id: str):
+    try:
+        profiles = await _buffer_list_profiles(artist_id)
+    except BufferNotConnected:
+        raise HTTPException(status_code=409, detail="Buffer account not connected")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    return {"artist_id": artist_id, "profiles": profiles}
 
 
 async def _buffer_post_real(

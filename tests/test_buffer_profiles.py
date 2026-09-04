@@ -1,0 +1,94 @@
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+import social_service as svc
+
+
+def _mock_response(status_code=200, body=None, text=""):
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.text = text
+    resp.json = MagicMock(return_value=body)
+    return resp
+
+
+def test_buffer_list_profiles_requires_connection(monkeypatch):
+    monkeypatch.setattr(svc, "_load_buffer_tokens", lambda artist_id: {})
+
+    with pytest.raises(svc.BufferNotConnected):
+        asyncio.run(svc._buffer_list_profiles("artist-1"))
+
+
+def test_buffer_list_profiles_fetches_profiles(monkeypatch):
+    monkeypatch.setattr(
+        svc,
+        "_load_buffer_tokens",
+        lambda artist_id: {"access_token": "token-123"},
+    )
+
+    profiles = [
+        {"id": "prof-1", "service": "instagram", "formatted_username": "@artist"},
+        {"id": "prof-2", "service": "facebook", "formatted_username": "Artist"},
+    ]
+    resp = _mock_response(200, profiles)
+
+    client = MagicMock()
+    client.get = AsyncMock(return_value=resp)
+
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=client)
+    cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("social_service.httpx.AsyncClient", return_value=cm):
+        result = asyncio.run(svc._buffer_list_profiles("artist-1"))
+
+    assert result == profiles
+    client.get.assert_awaited_once_with(
+        svc._BUFFER_PROFILES_URL,
+        params={"access_token": "token-123"},
+    )
+
+
+def test_buffer_list_profiles_rejects_non_200(monkeypatch):
+    monkeypatch.setattr(
+        svc,
+        "_load_buffer_tokens",
+        lambda artist_id: {"access_token": "token-123"},
+    )
+
+    resp = _mock_response(500, {}, "server error")
+
+    client = MagicMock()
+    client.get = AsyncMock(return_value=resp)
+
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=client)
+    cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("social_service.httpx.AsyncClient", return_value=cm):
+        with pytest.raises(RuntimeError, match="Buffer API returned 500"):
+            asyncio.run(svc._buffer_list_profiles("artist-1"))
+
+
+def test_buffer_list_profiles_rejects_invalid_shape(monkeypatch):
+    monkeypatch.setattr(
+        svc,
+        "_load_buffer_tokens",
+        lambda artist_id: {"access_token": "token-123"},
+    )
+
+    resp = _mock_response(200, {"unexpected": "object"})
+
+    client = MagicMock()
+    client.get = AsyncMock(return_value=resp)
+
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=client)
+    cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("social_service.httpx.AsyncClient", return_value=cm):
+        with pytest.raises(RuntimeError, match="invalid profile response"):
+            asyncio.run(svc._buffer_list_profiles("artist-1"))
