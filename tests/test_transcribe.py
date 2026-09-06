@@ -7,6 +7,9 @@ Run with:  python3 -m pytest tests/test_transcribe.py -v
 
 import io
 import importlib
+import os
+import threading
+import time
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -105,3 +108,40 @@ def test_env_override_max_upload_size(monkeypatch, tmp_path):
         files={"audio": ("x.mp3", io.BytesIO(b"X" * 1025), "audio/mpeg")},
     )
     assert resp.status_code == 413
+
+
+def test_provider_failure_cleans_up_temp_file(client):
+    mock_model = MagicMock()
+    mock_model.transcribe.side_effect = RuntimeError("provider detail must not leak")
+    with patch("main.get_whisper", return_value=mock_model), \
+         patch("main.os.unlink", wraps=os.unlink) as unlink:
+        resp = _upload(client, "clip.mp3", b"fake-audio-data")
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "Transcription unavailable"
+    unlink.assert_called_once()
+
+
+def test_provider_timeout_is_bounded_and_cleans_up(client, monkeypatch):
+    import main as m
+    worker_done = threading.Event()
+
+    def slow_transcribe(path):
+        time.sleep(0.05)
+        worker_done.set()
+        return {"text": "late"}
+
+    real_unlink = os.unlink
+
+    def unlink_after_worker(path):
+        assert worker_done.is_set()
+        real_unlink(path)
+
+    mock_model = MagicMock()
+    mock_model.transcribe.side_effect = slow_transcribe
+    monkeypatch.setattr(m, "TRANSCRIBE_TIMEOUT_SECONDS", 0.001)
+    with patch("main.get_whisper", return_value=mock_model), \
+         patch("main.os.unlink", side_effect=unlink_after_worker) as unlink:
+        resp = _upload(client, "clip.mp3", b"fake-audio-data")
+        assert resp.status_code == 504
+        assert resp.json()["detail"] == "Transcription timed out"
+        unlink.assert_called_once()

@@ -12,7 +12,7 @@ import os
 import sqlite3
 import uuid
 from datetime import datetime, timezone
-from email.utils import make_msgid
+from email.utils import make_msgid, parseaddr
 from pathlib import Path
 from typing import Optional
 
@@ -64,6 +64,8 @@ def init_execution_db():
             provider_result     TEXT,
             correlation_key     TEXT,
             resource_key        TEXT,
+            profile_binding     TEXT,
+            approved_at         TEXT,
             attempt_count       INTEGER NOT NULL DEFAULT 0,
             error_code          TEXT,
             error_detail        TEXT,
@@ -84,6 +86,10 @@ def init_execution_db():
     }
     if "resource_key" not in existing_cols:
         conn.execute("ALTER TABLE execution_operations ADD COLUMN resource_key TEXT")
+    if "profile_binding" not in existing_cols:
+        conn.execute("ALTER TABLE execution_operations ADD COLUMN profile_binding TEXT")
+    if "approved_at" not in existing_cols:
+        conn.execute("ALTER TABLE execution_operations ADD COLUMN approved_at TEXT")
     conn.execute(
         """CREATE UNIQUE INDEX IF NOT EXISTS uq_execution_operation_resource
            ON execution_operations (action_type, resource_key)
@@ -108,14 +114,15 @@ def init_execution_db():
 _OP_COLS = [
     "id", "artist_id", "action_type", "idempotency_key", "payload", "status",
     "provider", "provider_reference", "provider_result", "correlation_key",
-    "resource_key", "attempt_count", "error_code", "error_detail", "created_at", "updated_at",
+    "resource_key", "profile_binding", "approved_at", "attempt_count",
+    "error_code", "error_detail", "created_at", "updated_at",
     "provider_started_at", "completed_at", "reconciled_at",
 ]
 
 
 def _row_to_operation(row) -> dict:
     operation = dict(zip(_OP_COLS, row))
-    for key in ("payload", "provider_result"):
+    for key in ("payload", "provider_result", "profile_binding"):
         raw = operation.get(key)
         if raw:
             try:
@@ -123,7 +130,7 @@ def _row_to_operation(row) -> dict:
             except (TypeError, json.JSONDecodeError):
                 operation[key] = {}
         else:
-            operation[key] = None if key == "provider_result" else {}
+            operation[key] = None if key in ("provider_result", "profile_binding") else {}
     operation["reconciliation_required"] = operation["status"] in RECONCILABLE_STATUSES
     return operation
 
@@ -138,7 +145,25 @@ def _get_operation(operation_id: str) -> dict:
     return _row_to_operation(row) if row else {}
 
 
-def _validate_payload(action_type: str, payload: dict):
+def _valid_single_email_target(value: str) -> bool:
+    if any(char in value for char in ("\r", "\n", ",", ";")):
+        return False
+    display_name, address = parseaddr(value)
+    if display_name or address != value.strip():
+        return False
+    local, separator, domain = address.rpartition("@")
+    return bool(
+        separator
+        and local
+        and domain
+        and "." in domain
+        and not local.startswith(".")
+        and not local.endswith(".")
+        and " " not in address
+    )
+
+
+def _validate_payload(action_type: str, payload: dict) -> dict:
     if action_type not in SUPPORTED_ACTIONS:
         raise HTTPException(
             status_code=422,
@@ -150,10 +175,17 @@ def _validate_payload(action_type: str, payload: dict):
         )
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="payload must be an object")
+    normalized = dict(payload)
     if action_type == GMAIL_SEND:
         missing = [key for key in ("to", "subject", "body") if not isinstance(payload.get(key), str) or not payload[key]]
         if missing:
             raise HTTPException(status_code=422, detail=f"Missing Gmail fields: {', '.join(missing)}")
+        normalized["to"] = payload["to"].strip()
+        if not _valid_single_email_target(normalized["to"]):
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_recipient", "message": "A single valid recipient email is required."},
+            )
     elif action_type == SOCIAL_SCHEDULE:
         if not isinstance(payload.get("post_id"), str) or not payload["post_id"]:
             raise HTTPException(status_code=422, detail="social.buffer.schedule requires post_id")
@@ -163,6 +195,8 @@ def _validate_payload(action_type: str, payload: dict):
                 status_code=422,
                 detail="social.buffer.schedule requires non-empty buffer_profile_ids",
             )
+        normalized["buffer_profile_ids"] = sorted(set(profiles))
+    return normalized
 
 
 def _create_or_get_operation(
@@ -171,7 +205,7 @@ def _create_or_get_operation(
     idempotency_key: str,
     payload: dict,
 ) -> tuple[dict, bool]:
-    _validate_payload(action_type, payload)
+    payload = _validate_payload(action_type, payload)
     if not artist_id.strip() or not idempotency_key.strip():
         raise HTTPException(status_code=422, detail="artist_id and idempotency_key are required")
 
@@ -179,6 +213,7 @@ def _create_or_get_operation(
     provider = "gmail" if action_type == GMAIL_SEND else "buffer"
     correlation_key = _message_id_for(operation_id) if action_type == GMAIL_SEND else operation_id
     resource_key = payload["post_id"] if action_type == SOCIAL_SCHEDULE else None
+    profile_binding = payload.get("buffer_profile_ids") if action_type == SOCIAL_SCHEDULE else None
     timestamp = _now()
     encoded_payload = json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -187,11 +222,12 @@ def _create_or_get_operation(
         conn.execute(
             """INSERT INTO execution_operations
                (id,artist_id,action_type,idempotency_key,payload,status,provider,
-                correlation_key,resource_key,created_at,updated_at)
-               VALUES (?,?,?,?,?,'pending',?,?,?,?,?)""",
+                correlation_key,resource_key,profile_binding,created_at,updated_at)
+               VALUES (?,?,?,?,?,'pending',?,?,?,?,?,?)""",
             (
                 operation_id, artist_id, action_type, idempotency_key,
                 encoded_payload, provider, correlation_key, resource_key,
+                json.dumps(profile_binding) if profile_binding is not None else None,
                 timestamp, timestamp,
             ),
         )
@@ -258,6 +294,16 @@ def _claim_pending(operation_id: str) -> tuple[dict, bool]:
         if operation["status"] not in EXECUTABLE_STATUSES:
             conn.rollback()
             return operation, False
+        if not operation["approved_at"]:
+            conn.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "operation_not_approved",
+                    "operation_id": operation_id,
+                    "message": "Approve the durable operation before execution.",
+                },
+            )
         timestamp = _now()
         conn.execute(
             """UPDATE execution_operations
@@ -349,6 +395,32 @@ def _require_operation_owner(operation: dict, artist_id: Optional[str]):
         raise HTTPException(status_code=404, detail="Operation not found")
 
 
+def approve_operation(operation_id: str, artist_id: Optional[str] = None) -> dict:
+    operation = _get_operation(operation_id)
+    if not operation:
+        raise HTTPException(status_code=404, detail="Operation not found")
+    _require_operation_owner(operation, artist_id)
+    if operation["status"] not in EXECUTABLE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "operation_not_approvable",
+                "status": operation["status"],
+            },
+        )
+    timestamp = _now()
+    conn = sqlite3.connect(str(_DB_PATH))
+    conn.execute(
+        """UPDATE execution_operations
+           SET approved_at=COALESCE(approved_at, ?), updated_at=?
+           WHERE id=? AND status IN ('pending','failed_retryable')""",
+        (timestamp, timestamp, operation_id),
+    )
+    conn.commit()
+    conn.close()
+    return _get_operation(operation_id)
+
+
 async def execute_operation(operation_id: str, artist_id: Optional[str] = None) -> dict:
     existing = _get_operation(operation_id)
     if not existing:
@@ -385,6 +457,40 @@ async def execute_operation(operation_id: str, artist_id: Optional[str] = None) 
                 error_detail="The social post does not exist for this artist.",
                 expected_status="executing",
             )
+        if payload.get("buffer_profile_ids") != operation.get("profile_binding"):
+            return _finish(
+                operation_id,
+                "failed",
+                error_code="profile_binding_mismatch",
+                error_detail="The operation payload no longer matches its durable Buffer profile binding.",
+                expected_status="executing",
+            )
+        # Mock/local execution must never make a live Buffer request. In live
+        # mode, fail closed by revalidating the immutable profile binding
+        # immediately before the write-capable provider call.
+        if social_service._BUFFER_LIVE:
+            try:
+                profiles = await social_service._buffer_list_profiles(operation["artist_id"])
+            except RuntimeError as exc:
+                return _finish(
+                    operation_id,
+                    "failed_retryable",
+                    error_code="buffer_profile_discovery_failed",
+                    error_detail=str(exc),
+                    expected_status="executing",
+                )
+            available_profile_ids = {
+                profile.get("id") for profile in profiles if isinstance(profile, dict) and profile.get("id")
+            }
+            invalid_profile_ids = sorted(set(operation["profile_binding"]) - available_profile_ids)
+            if invalid_profile_ids:
+                return _finish(
+                    operation_id,
+                    "failed",
+                    error_code="invalid_buffer_profile",
+                    error_detail=f"Selected Buffer profiles are unavailable: {', '.join(invalid_profile_ids)}",
+                    expected_status="executing",
+                )
         if not _claim_social_post(operation):
             return _finish(
                 operation_id,
@@ -557,6 +663,11 @@ async def create_and_execute_operation(req: OperationRequest):
     )
     operation = await execute_operation(operation["id"])
     return {"operation": operation, "created": created}
+
+
+@router.post("/api/operations/{operation_id}/approve", tags=["operations"])
+def api_approve_operation(operation_id: str, artist_id: str):
+    return approve_operation(operation_id, artist_id=artist_id)
 
 
 @router.get("/api/operations/{operation_id}", tags=["operations"])

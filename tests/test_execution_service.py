@@ -1,7 +1,7 @@
 import asyncio
 import importlib
 import sqlite3
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
@@ -23,6 +23,12 @@ def services(tmp_path, monkeypatch):
     pitch_service.init_pitch_db()
     social_service.init_social_db()
     execution_service.init_execution_db()
+    async def fake_profiles(artist_id):
+        return [
+            {"id": "profile-1", "service": "instagram"},
+            {"id": "profile-2", "service": "twitter"},
+        ]
+    monkeypatch.setattr(social_service, "_buffer_list_profiles", fake_profiles)
     return execution_service, pitch_service, social_service, db
 
 
@@ -37,6 +43,10 @@ def _gmail_request(key="gmail-key", body="Hello"):
             "body": body,
         },
     }
+
+
+def _approve(svc, operation):
+    return svc.approve_operation(operation["id"], artist_id=operation["artist_id"])
 
 
 def test_create_is_idempotent_and_conflicting_payload_is_rejected(services):
@@ -83,6 +93,7 @@ def test_gmail_success_records_provider_result_and_replay_does_not_resend(servic
 
     monkeypatch.setattr(pitch, "send_email", fake_send)
     operation, _ = svc._create_or_get_operation(**_gmail_request())
+    _approve(svc, operation)
     result = asyncio.run(svc.execute_operation(operation["id"]))
     replay = asyncio.run(svc.execute_operation(operation["id"]))
 
@@ -102,6 +113,7 @@ def test_unknown_gmail_outcome_reconciles_by_message_id(services, monkeypatch):
 
     monkeypatch.setattr(pitch, "send_email", timed_out)
     operation, _ = svc._create_or_get_operation(**_gmail_request())
+    _approve(svc, operation)
     unknown = asyncio.run(svc.execute_operation(operation["id"]))
     assert unknown["status"] == "unknown"
     assert unknown["reconciliation_required"] is True
@@ -121,6 +133,7 @@ def test_unknown_gmail_outcome_reconciles_by_message_id(services, monkeypatch):
 def test_startup_moves_interrupted_execution_to_unknown(services):
     svc, _, _, db = services
     operation, _ = svc._create_or_get_operation(**_gmail_request())
+    _approve(svc, operation)
     conn = sqlite3.connect(str(db))
     conn.execute(
         "UPDATE execution_operations SET status='executing' WHERE id=?",
@@ -146,18 +159,21 @@ def test_single_social_post_success_updates_post_and_records_buffer_result(servi
         "scheduled_at": "2026-09-04T12:00:00+00:00",
     })
     calls = []
+    discovery = AsyncMock()
 
     async def fake_schedule(*args, **kwargs):
         calls.append((args, kwargs))
         return {"id": "buffer-1", "status": "buffer_queued", "mocked": True}
 
     monkeypatch.setattr(social, "_buffer_schedule_post", fake_schedule)
+    monkeypatch.setattr(social, "_buffer_list_profiles", discovery)
     operation, _ = svc._create_or_get_operation(
         artist_id="artist-1",
         action_type="social.buffer.schedule",
         idempotency_key="social-key",
         payload={"post_id": "post-1", "buffer_profile_ids": ["profile-1"]},
     )
+    _approve(svc, operation)
     result = asyncio.run(svc.execute_operation(operation["id"]))
 
     assert result["status"] == "succeeded"
@@ -166,6 +182,7 @@ def test_single_social_post_success_updates_post_and_records_buffer_result(servi
     assert social._db_get_post("post-1")["status"] == "scheduled"
     assert social._db_get_post("post-1")["buffer_update_id"] == "buffer-1"
     assert len(calls) == 1
+    discovery.assert_not_called()
 
 
 def test_social_post_can_only_be_bound_to_one_operation(services):
@@ -250,6 +267,7 @@ def test_unknown_social_outcome_requires_manual_reconciliation_and_never_retries
         idempotency_key="social-unknown",
         payload={"post_id": "post-2", "buffer_profile_ids": ["profile-2"]},
     )
+    _approve(svc, operation)
     unknown = asyncio.run(svc.execute_operation(operation["id"]))
     replay = asyncio.run(svc.execute_operation(operation["id"]))
     reconciled = asyncio.run(svc.reconcile_operation(operation["id"]))
@@ -285,6 +303,7 @@ def test_buffer_not_connected_can_retry_same_operation_safely(services, monkeypa
         idempotency_key="retryable-social",
         payload={"post_id": "post-retry", "buffer_profile_ids": ["profile-1"]},
     )
+    _approve(svc, operation)
 
     first = asyncio.run(svc.execute_operation(operation["id"]))
     assert first["status"] == "failed_retryable"
@@ -295,3 +314,79 @@ def test_buffer_not_connected_can_retry_same_operation_safely(services, monkeypa
     assert second["provider_reference"] == "buffer-retried"
     assert second["attempt_count"] == 2
     assert attempts["count"] == 2
+
+
+def test_unapproved_operation_never_calls_provider(services, monkeypatch):
+    svc, pitch, _, _ = services
+    send = MagicMock()
+    monkeypatch.setattr(pitch, "send_email", send)
+    operation, _ = svc._create_or_get_operation(**_gmail_request())
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(svc.execute_operation(operation["id"]))
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "operation_not_approved"
+    send.assert_not_called()
+    assert svc._get_operation(operation["id"])["status"] == "pending"
+
+
+@pytest.mark.parametrize(
+    "recipient",
+    ["", "not-an-email", "a@example.com,b@example.com", "Name <a@example.com>", "a@example.com\nBcc:x@example.com"],
+)
+def test_invalid_gmail_recipient_rejected_before_ledger_insert(services, recipient):
+    svc, _, _, db = services
+    request = _gmail_request()
+    request["payload"]["to"] = recipient
+    with pytest.raises(HTTPException) as exc:
+        svc._create_or_get_operation(**request)
+    assert exc.value.status_code == 422
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("SELECT COUNT(*) FROM execution_operations").fetchone()[0] == 0
+    conn.close()
+
+
+def test_social_profile_binding_is_canonical_and_validated(services, monkeypatch):
+    svc, _, social, _ = services
+    social._db_create_post({
+        "id": "post-binding",
+        "artist_id": "artist-1",
+        "platform": "instagram",
+        "content": "Bound profiles",
+        "status": "draft",
+    })
+    request = {
+        "artist_id": "artist-1",
+        "action_type": "social.buffer.schedule",
+        "idempotency_key": "binding-key",
+        "payload": {
+            "post_id": "post-binding",
+            "buffer_profile_ids": ["profile-2", "profile-1", "profile-2"],
+        },
+    }
+    operation, _ = svc._create_or_get_operation(**request)
+    replay, created = svc._create_or_get_operation(
+        **{
+            **request,
+            "payload": {
+                "post_id": "post-binding",
+                "buffer_profile_ids": ["profile-1", "profile-2"],
+            },
+        }
+    )
+    assert created is False
+    assert replay["id"] == operation["id"]
+    assert operation["profile_binding"] == ["profile-1", "profile-2"]
+
+    async def only_one_profile(artist_id):
+        return [{"id": "profile-1", "service": "instagram"}]
+
+    schedule = MagicMock()
+    monkeypatch.setattr(social, "_BUFFER_LIVE", True)
+    monkeypatch.setattr(social, "_buffer_list_profiles", only_one_profile)
+    monkeypatch.setattr(social, "_buffer_schedule_post", schedule)
+    _approve(svc, operation)
+    failed = asyncio.run(svc.execute_operation(operation["id"]))
+    assert failed["status"] == "failed"
+    assert failed["error_code"] == "invalid_buffer_profile"
+    schedule.assert_not_called()

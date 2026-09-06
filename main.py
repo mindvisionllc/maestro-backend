@@ -80,6 +80,7 @@ AUDIO_CACHE.mkdir(parents=True, exist_ok=True)
 
 MAX_UPLOAD_BYTES    = int(os.environ.get("MAX_UPLOAD_SIZE", str(25 * 1024 * 1024)))  # 25 MB default
 _ALLOWED_AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".ogg", ".webm"}
+TRANSCRIBE_TIMEOUT_SECONDS = float(os.environ.get("TRANSCRIBE_TIMEOUT_SECONDS", "120"))
 
 # Cloud integrations (optional — graceful degradation when absent)
 CLOUDINARY_CLOUD_NAME = os.environ.get("CLOUDINARY_CLOUD_NAME", "")
@@ -1407,8 +1408,18 @@ async def list_agents():
 async def get_artist(artist_id: str = ""):
     return load_artist(artist_id)
 
+def _delete_transcription_temp(path: str):
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        log.warning("transcription_temp_cleanup_failed", path=path, error_type=type(exc).__name__)
+
+
 @app.post("/api/transcribe")
 async def transcribe(audio: UploadFile = File(...), request: Request = None):
+    tmp = None
     try:
         filename = audio.filename or "voice.m4a"
         ext      = (os.path.splitext(filename)[1] or ".m4a").lower()
@@ -1440,16 +1451,37 @@ async def transcribe(audio: UploadFile = File(...), request: Request = None):
             f.write(data)
             tmp = f.name
         loop   = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, lambda: model.transcribe(tmp))
-        os.unlink(tmp)
+        transcribe_path = tmp
+        worker = loop.run_in_executor(None, lambda: model.transcribe(transcribe_path))
+        try:
+            # Shield keeps the worker future observable after the request timeout,
+            # allowing cleanup only after the thread has stopped using the file.
+            result = await asyncio.wait_for(
+                asyncio.shield(worker),
+                timeout=TRANSCRIBE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            worker.add_done_callback(lambda _: _delete_transcription_temp(transcribe_path))
+            tmp = None
+            raise
+        except asyncio.CancelledError:
+            worker.add_done_callback(lambda _: _delete_transcription_temp(transcribe_path))
+            tmp = None
+            raise
         text = result["text"].strip()
         print(f"[TRANSCRIBE] result: {repr(text)}")
         return {"text": text}
+    except asyncio.TimeoutError:
+        print("[TRANSCRIBE] ERROR: provider timeout")
+        raise HTTPException(status_code=504, detail="Transcription timed out")
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[TRANSCRIBE] ERROR: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[TRANSCRIBE] ERROR: {type(e).__name__}")
+        raise HTTPException(status_code=503, detail="Transcription unavailable")
+    finally:
+        if tmp:
+            _delete_transcription_temp(tmp)
 
 @app.post("/api/greet")
 async def greet(agent_id: str = Form(...), tts_on: str = Form(default="true", alias="tts")):
@@ -13236,7 +13268,28 @@ async def tts_endpoint(text: str, voice: str = "am_michael"):
         return Response(content=audio_bytes, media_type="audio/wav")
     return JSONResponse({"error": "TTS unavailable"}, status_code=503)
 
-_cancelled_calls: set = set()  # call_ids cancelled mid-flight; checked before returning audio
+_TTS_MAX_TEXT_CHARS = int(os.environ.get("TTS_MAX_TEXT_CHARS", "4000"))
+_TTS_MAX_CALL_ID_CHARS = 128
+_TTS_CANCEL_TTL_SECONDS = float(os.environ.get("TTS_CANCEL_TTL_SECONDS", "300"))
+_TTS_MAX_CANCELLED_CALLS = max(1, int(os.environ.get("TTS_MAX_CANCELLED_CALLS", "1000")))
+_cancelled_calls: dict[str, float] = {}
+
+
+def _purge_expired_tts_cancellations():
+    now = time.monotonic()
+    expired = [call_id for call_id, expires_at in _cancelled_calls.items() if expires_at <= now]
+    for call_id in expired:
+        _cancelled_calls.pop(call_id, None)
+
+
+def _validate_tts_call_id(call_id: str, *, required: bool = False):
+    if required and not call_id.strip():
+        raise HTTPException(status_code=422, detail="call_id is required")
+    if len(call_id) > _TTS_MAX_CALL_ID_CHARS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"call_id exceeds {_TTS_MAX_CALL_ID_CHARS} character limit",
+        )
 
 class TtsSynthRequest(BaseModel):
     text:    str
@@ -13249,21 +13302,37 @@ class TtsCancelRequest(BaseModel):
 @app.post("/api/tts/cancel")
 async def tts_cancel(req: TtsCancelRequest):
     """Mark a call as ended so any in-flight /api/tts/synth for that call returns null."""
-    if req.call_id:
-        _cancelled_calls.add(req.call_id)
+    _validate_tts_call_id(req.call_id, required=True)
+    _purge_expired_tts_cancellations()
+    if req.call_id not in _cancelled_calls and len(_cancelled_calls) >= _TTS_MAX_CANCELLED_CALLS:
+        oldest_call_id = min(_cancelled_calls, key=_cancelled_calls.get)
+        _cancelled_calls.pop(oldest_call_id, None)
+    _cancelled_calls[req.call_id] = time.monotonic() + _TTS_CANCEL_TTL_SECONDS
     return {"cancelled": req.call_id}
 
 @app.post("/api/tts/synth")
 async def tts_synth(req: TtsSynthRequest):
     """Synthesize text → base64 WAV. Used by app to bypass SSE buffering."""
+    _validate_tts_call_id(req.call_id)
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="text is required")
+    if len(text) > _TTS_MAX_TEXT_CHARS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"text exceeds {_TTS_MAX_TEXT_CHARS} character limit",
+        )
+    if not req.voice.strip() or len(req.voice) > 100:
+        raise HTTPException(status_code=422, detail="voice must be between 1 and 100 characters")
+    _purge_expired_tts_cancellations()
     if req.call_id and req.call_id in _cancelled_calls:
-        _cancelled_calls.discard(req.call_id)
+        _cancelled_calls.pop(req.call_id, None)
         return JSONResponse({"audio": None, "cancelled": True}, status_code=200)
     _tts_last_error.clear()
-    audio_bytes = await tts(req.text, req.voice)
+    audio_bytes = await tts(text, req.voice)
     # Check again — call may have ended while synthesis was running
     if req.call_id and req.call_id in _cancelled_calls:
-        _cancelled_calls.discard(req.call_id)
+        _cancelled_calls.pop(req.call_id, None)
         return JSONResponse({"audio": None, "cancelled": True}, status_code=200)
     if audio_bytes:
         return {"audio": base64.b64encode(audio_bytes).decode()}
@@ -13364,7 +13433,7 @@ async def get_history(artist_id: str, agent_id: str):
         return {"history": [{"role": r[0], "content": r[1]} for r in rows]}
     except Exception as e:
         print(f"[HISTORY] error: {e}")
-        return {"history": []}
+        raise HTTPException(status_code=503, detail="Conversation history unavailable")
 
 
 # ── Artist lookup by name ──────────────────────────────────────────────────────

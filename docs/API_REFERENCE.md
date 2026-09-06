@@ -49,6 +49,7 @@ Sorted alphabetically by path.
 | POST | `/api/booking-inquiries/scan` | Yes (X-API-Key) | Api Scan Booking Inbox |
 | GET | `/api/buffer/auth` | Yes (X-API-Key) | Buffer Auth |
 | GET | `/api/buffer/callback` | Yes (X-API-Key) | Buffer Callback |
+| GET | `/api/buffer/profiles` | Yes (X-API-Key) | Buffer Profiles |
 | GET | `/api/buffer/status` | Yes (X-API-Key) | Buffer Status |
 | POST | `/api/chat_stream` | Yes (X-API-Key) | Chat Stream |
 | GET | `/api/curators` | Yes (X-API-Key) | List Curators |
@@ -69,6 +70,12 @@ Sorted alphabetically by path.
 | GET | `/api/notifications/{artist_id}` | Yes (X-API-Key) | Get Notifications |
 | POST | `/api/notifications/register` | Yes (X-API-Key) | Register Push Token |
 | POST | `/api/notifications/send` | Yes (X-API-Key) | Send Notification |
+| POST | `/api/operations` | Yes (X-API-Key) | Create Operation |
+| POST | `/api/operations/execute` | Yes (X-API-Key) | Create And Execute Operation |
+| GET | `/api/operations/{operation_id}` | Yes (X-API-Key) | Get Operation |
+| POST | `/api/operations/{operation_id}/approve` | Yes (X-API-Key) | Approve Operation |
+| POST | `/api/operations/{operation_id}/execute` | Yes (X-API-Key) | Execute Operation |
+| POST | `/api/operations/{operation_id}/reconcile` | Yes (X-API-Key) | Reconcile Operation |
 | GET | `/api/pitches` | Yes (X-API-Key) | List Pitches |
 | GET | `/api/pitches/{pitch_id}` | Yes (X-API-Key) | Get Pitch |
 | PATCH | `/api/pitches/{pitch_id}` | Yes (X-API-Key) | Patch Pitch |
@@ -585,6 +592,68 @@ Sorted alphabetically by path.
 - **Query params:** `artist_id` (string, required)
 - **Response:** 200 — `{ connected: bool }`
 
+#### GET /api/buffer/profiles
+
+- **Summary:** Buffer Profiles — discover the profiles available to an artist's connected Buffer account
+- **Auth:** Yes (X-API-Key)
+- **Query params:** `artist_id` (string, required)
+- **Persistent side effects:** None; profile discovery is read-only
+- **Response:** 200 — `{ artist_id: string, profiles: [{ id, service, formatted_username, ... }] }`
+- **Failures:** 409 when Buffer is not connected; 502 when Buffer returns an invalid or failed response
+
+---
+
+### operations — Durable approved provider execution
+
+Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR, booking, release, and batch operations are rejected.
+
+#### POST /api/operations
+
+- **Summary:** Create Operation — persist an idempotent operation before approval or execution
+- **Auth:** Yes (X-API-Key)
+- **Request body:** `artist_id`, `action_type`, `idempotency_key`, and action-specific `payload`
+- **Response:** 200 — `{ operation, created }`
+
+#### POST /api/operations/{operation_id}/approve
+
+- **Summary:** Approve Operation — durably approve a pending or safely retryable operation
+- **Auth:** Yes (X-API-Key)
+- **Path params:** `operation_id` (string, required)
+- **Query params:** `artist_id` (string, required)
+- **Response:** 200 — operation object with non-null `approved_at`
+
+#### POST /api/operations/{operation_id}/execute
+
+- **Summary:** Execute Operation — execute an approved operation at most once unless a failure is known to be safely retryable
+- **Auth:** Yes (X-API-Key)
+- **Path params:** `operation_id` (string, required)
+- **Query params:** `artist_id` (string, required)
+- **Response:** 200 — durable operation object
+- **Failures:** 409 when the operation has not been approved
+
+#### POST /api/operations/execute
+
+- **Summary:** Create And Execute Operation — resolve an idempotent operation and execute it only if it was previously approved
+- **Auth:** Yes (X-API-Key)
+- **Request body:** same as `POST /api/operations`
+- **Response:** 200 — `{ operation, created }`
+
+#### GET /api/operations/{operation_id}
+
+- **Summary:** Get Operation — retrieve durable status, provider result, error, and reconciliation state
+- **Auth:** Yes (X-API-Key)
+- **Path params:** `operation_id` (string, required)
+- **Query params:** `artist_id` (string, required)
+- **Response:** 200 — operation object
+
+#### POST /api/operations/{operation_id}/reconcile
+
+- **Summary:** Reconcile Operation — safely inspect an unknown Gmail outcome or mark Buffer for manual reconciliation
+- **Auth:** Yes (X-API-Key)
+- **Path params:** `operation_id` (string, required)
+- **Query params:** `artist_id` (string, required)
+- **Response:** 200 — updated durable operation object
+
 ---
 
 ### reports — Weekly activity reports with AI-generated insights
@@ -777,7 +846,7 @@ Sorted alphabetically by path.
 - **Summary:** Greet — return the agent's opening line when an artist starts a chat (uses static rotating greetings, zero API calls)
 - **Auth:** Yes (X-API-Key)
 - **Request body:** form-encoded: `agent_id` (string, required), `tts_on` (string, optional, default `"true"`)
-- **Response:** 200 — `{ greeting: "...", audio_b64: "..." }`
+- **Response:** 200 — `{ reply: "...", audio: "..." | null }`
 
 #### POST /api/handoff
 
@@ -789,7 +858,7 @@ Sorted alphabetically by path.
   - `tts_on` (string, optional, default `"true"`)
   - `artist_id` (string, optional, default `""`)
   - `from_agent_id` (string, optional, default `"puppet-master"`)
-- **Response:** 200 — `{ greeting: "...", audio_b64: "..." }`
+- **Response:** 200 — `{ reply: "...", audio: "..." | null }`
 
 #### POST /api/chat_stream
 
@@ -825,13 +894,13 @@ Sorted alphabetically by path.
   - `text` (string, required)
   - `voice` (string, optional, default `"am_onyx"`)
   - `call_id` (string, optional, default `""`)
-- **Response:** 200 — `{ audio_b64: "..." }`
+- **Response:** 200 — `{ audio: "..." }` or `{ audio: null, cancelled: true }`
 
 #### GET /api/tts/status
 
 - **Summary:** Tts Status — returns whether TTS is ready (Kokoro loaded OR ElevenLabs key present)
 - **Auth:** Yes (X-API-Key)
-- **Response:** 200 — `{ ready: bool, provider: "kokoro"|"elevenlabs" }`
+- **Response:** 200 — `{ ready: bool, engine: "kokoro"|"elevenlabs"|"none" }`
 
 #### GET /api/health
 
@@ -844,7 +913,7 @@ Sorted alphabetically by path.
 - **Summary:** Get History — retrieve conversation history for an artist/agent pair
 - **Auth:** Yes (X-API-Key)
 - **Query params:** `artist_id` (string, required), `agent_id` (string, required)
-- **Response:** 200 — array of conversation turn objects
+- **Response:** 200 — `{ history: [{ role: string, content: string }, ...] }`
 
 #### POST /api/auth/send-otp
 
