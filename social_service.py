@@ -44,7 +44,6 @@ _BUFFER_TOKEN_URL     = "https://api.bufferapp.com/1/oauth2/token.json"
 _BUFFER_POST_URL      = "https://api.bufferapp.com/1/updates/create.json"
 _BUFFER_PROFILES_URL  = "https://api.bufferapp.com/1/profiles.json"
 # R-26: feature flag for real Buffer HTTP client (BUFFER_LIVE=false default — safe)
-_BUFFER_API_KEY       = os.environ.get("BUFFER_API_KEY", "")
 _BUFFER_LIVE          = os.environ.get("BUFFER_LIVE", "false").lower() == "true"
 
 _SCHEDULER_ENABLED = os.environ.get("SCHEDULER_ENABLED", "").lower() == "true"
@@ -560,15 +559,15 @@ async def _buffer_schedule_post(
     """Schedule a post via Buffer API.
 
     Routing logic (R-26):
-      BUFFER_LIVE=false (default) or BUFFER_API_KEY unset → mock response (safe)
-      SCHEDULER_ENABLED=dry_run                           → log would_have_posted, mock response
-      BUFFER_LIVE=true and BUFFER_API_KEY set             → real Buffer HTTP call
+      BUFFER_LIVE=false (default) → mock response (safe)
+      SCHEDULER_ENABLED=dry_run  → log would_have_posted, mock response
+      BUFFER_LIVE=true           → real Buffer HTTP call using artist OAuth token
     """
     tokens = _load_buffer_tokens(artist_id)
     if not tokens.get("access_token"):
         raise BufferNotConnected(f"Artist {artist_id} has not connected Buffer")
 
-    if not (_BUFFER_LIVE and _BUFFER_API_KEY):
+    if not _BUFFER_LIVE:
         log.info("buffer_post_mocked", extra={
             "event": "buffer_post_mocked", "artist_id": artist_id, "reason": "BUFFER_LIVE not enabled",
         })

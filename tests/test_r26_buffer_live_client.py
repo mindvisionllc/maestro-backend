@@ -3,9 +3,8 @@ R-26 — Buffer real HTTP client behind BUFFER_LIVE feature flag.
 
 Tests (all mock httpx.AsyncClient — no real Buffer calls):
 1. BUFFER_LIVE=false (default) → mock response returned, no HTTP call
-2. BUFFER_LIVE=true but BUFFER_API_KEY empty → mock response returned, no HTTP call
-3. BUFFER_LIVE=true + BUFFER_API_KEY set + SCHEDULER_ENABLED=dry_run → would_have_posted logged, mock returned
-4. BUFFER_LIVE=true + BUFFER_API_KEY set + live → httpx POST called with correct payload
+2. BUFFER_LIVE=true + SCHEDULER_ENABLED=dry_run → would_have_posted logged, mock returned
+3. BUFFER_LIVE=true → httpx POST called with artist OAuth access token
 5. 200 response → result returned correctly
 6. 429 first then 200 → retried once, 200 returned
 7. 429 on all attempts → RuntimeError raised
@@ -30,16 +29,11 @@ _FAKE_PROFILE = ["prof-1", "prof-2"]
 _FAKE_CONTENT = "New single out now — link in bio 🎵"
 
 
-def _reload_social(monkeypatch, *, buffer_live: bool, buffer_api_key: str = "", scheduler_enabled: str = ""):
+def _reload_social(monkeypatch, *, buffer_live: bool, scheduler_enabled: str = ""):
     if buffer_live:
         monkeypatch.setenv("BUFFER_LIVE", "true")
     else:
         monkeypatch.setenv("BUFFER_LIVE", "false")
-
-    if buffer_api_key:
-        monkeypatch.setenv("BUFFER_API_KEY", buffer_api_key)
-    else:
-        monkeypatch.delenv("BUFFER_API_KEY", raising=False)
 
     if scheduler_enabled:
         monkeypatch.setenv("SCHEDULER_ENABLED", scheduler_enabled)
@@ -88,23 +82,11 @@ def test_buffer_live_false_returns_mock(monkeypatch):
 
 # ── Test 2: BUFFER_LIVE=true but no API key → mock ───────────────────────────
 
-def test_buffer_live_true_no_api_key_returns_mock(monkeypatch):
-    """BUFFER_LIVE=true but BUFFER_API_KEY empty → mock response; httpx never called."""
-    svc = _reload_social(monkeypatch, buffer_live=True, buffer_api_key="")
-    _with_tokens(svc, _FAKE_ARTIST, _FAKE_TOKEN)
-
-    with patch("httpx.AsyncClient") as mock_client:
-        result = asyncio.run(svc._buffer_schedule_post(_FAKE_ARTIST, _FAKE_CONTENT, _FAKE_PROFILE))
-
-    assert result.get("mocked") is True
-    mock_client.assert_not_called()
-
-
 # ── Test 3: dry_run → would_have_posted logged, mock returned ────────────────
 
 def test_buffer_dry_run_logs_would_have_posted(monkeypatch):
     """SCHEDULER_ENABLED=dry_run → would_have_posted event logged; httpx not called."""
-    svc = _reload_social(monkeypatch, buffer_live=True, buffer_api_key="test-key", scheduler_enabled="dry_run")
+    svc = _reload_social(monkeypatch, buffer_live=True, scheduler_enabled="dry_run")
     _with_tokens(svc, _FAKE_ARTIST, _FAKE_TOKEN)
 
     info_calls = []
@@ -128,7 +110,7 @@ def test_buffer_dry_run_logs_would_have_posted(monkeypatch):
 
 def test_buffer_live_calls_httpx_post(monkeypatch):
     """BUFFER_LIVE=true + key set → httpx.AsyncClient.post() called with access_token in payload."""
-    svc = _reload_social(monkeypatch, buffer_live=True, buffer_api_key="live-key")
+    svc = _reload_social(monkeypatch, buffer_live=True)
     _with_tokens(svc, _FAKE_ARTIST, _FAKE_TOKEN)
 
     ok_body = {"id": "upd-123", "status": "buffer_sent"}
@@ -154,7 +136,7 @@ def test_buffer_live_calls_httpx_post(monkeypatch):
 
 def test_buffer_200_response_parsed(monkeypatch):
     """200 OK response is returned verbatim."""
-    svc = _reload_social(monkeypatch, buffer_live=True, buffer_api_key="live-key")
+    svc = _reload_social(monkeypatch, buffer_live=True)
     _with_tokens(svc, _FAKE_ARTIST, _FAKE_TOKEN)
 
     ok_body = {"id": "upd-abc", "status": "buffer_queued", "extra_field": True}
@@ -175,7 +157,7 @@ def test_buffer_200_response_parsed(monkeypatch):
 
 def test_buffer_429_then_200_retries(monkeypatch):
     """First call returns 429; second call returns 200 → success after retry."""
-    svc = _reload_social(monkeypatch, buffer_live=True, buffer_api_key="live-key")
+    svc = _reload_social(monkeypatch, buffer_live=True)
     _with_tokens(svc, _FAKE_ARTIST, _FAKE_TOKEN)
 
     rate_resp = _mock_response(status_code=429)
@@ -204,7 +186,7 @@ def test_buffer_429_then_200_retries(monkeypatch):
 
 def test_buffer_429_all_attempts_raises(monkeypatch):
     """All attempts return 429 → RuntimeError raised."""
-    svc = _reload_social(monkeypatch, buffer_live=True, buffer_api_key="live-key")
+    svc = _reload_social(monkeypatch, buffer_live=True)
     _with_tokens(svc, _FAKE_ARTIST, _FAKE_TOKEN)
 
     rate_resp = _mock_response(status_code=429)
@@ -226,7 +208,7 @@ def test_buffer_429_all_attempts_raises(monkeypatch):
 
 def test_buffer_500_raises(monkeypatch):
     """500 from Buffer → RuntimeError raised immediately."""
-    svc = _reload_social(monkeypatch, buffer_live=True, buffer_api_key="live-key")
+    svc = _reload_social(monkeypatch, buffer_live=True)
     _with_tokens(svc, _FAKE_ARTIST, _FAKE_TOKEN)
 
     err_resp = _mock_response(status_code=500, body={"error": "server error"})
@@ -244,7 +226,7 @@ def test_buffer_500_raises(monkeypatch):
 
 def test_buffer_malformed_json_raises(monkeypatch):
     """200 OK but body is not valid JSON → RuntimeError raised."""
-    svc = _reload_social(monkeypatch, buffer_live=True, buffer_api_key="live-key")
+    svc = _reload_social(monkeypatch, buffer_live=True)
     _with_tokens(svc, _FAKE_ARTIST, _FAKE_TOKEN)
 
     bad_resp = _mock_response(status_code=200, body="not-json-at-all")
