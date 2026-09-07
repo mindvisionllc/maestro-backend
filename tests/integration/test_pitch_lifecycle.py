@@ -57,78 +57,38 @@ def _claude_classify_response(sentiment="positive"):
 
 # ── Lifecycle test ────────────────────────────────────────────────────────────
 
-def test_pitch_lifecycle_full(client):
-    # ── Step 1: Create curator ────────────────────────────────────────────────
+def test_pitch_draft_generation_and_legacy_batch_lockdown(client):
     r = client.post("/api/curators", json={
-        "name":          "Jordan Lee",
-        "outlet":        "Indie Discovery Playlist",
-        "genres":        ["indie", "pop"],
-        "tier":          "B",
+        "name": "Jordan Lee",
+        "outlet": "Indie Discovery Playlist",
+        "genres": ["indie", "pop"],
+        "tier": "B",
         "contact_email": "jordan@example.com",
     })
     assert r.status_code == 201, r.text
-    curator = r.json()
-    curator_id = curator["id"]
-    assert curator["tier"] == "B"
+    curator_id = r.json()["id"]
 
-    # ── Step 2: Generate pitch email (Claude mocked) ──────────────────────────
-    mock_resp = _claude_pitch_response()
     with patch("anthropic.Anthropic") as mock_claude:
-        mock_claude.return_value.messages.create.return_value = mock_resp
+        mock_claude.return_value.messages.create.return_value = _claude_pitch_response()
         r = client.post("/api/pitches/generate", json={
-            "artist_id":  ARTIST_ID,
+            "artist_id": ARTIST_ID,
             "curator_id": curator_id,
         })
+
     assert r.status_code == 200, r.text
-    generated = r.json()
-    assert "subject" in generated
-    assert "body" in generated
+    assert r.json()["subject"]
+    assert r.json()["body"]
 
-    # ── Step 3: Batch send (mocked Claude + mocked Gmail send) ────────────────
-    thread_id  = f"thread-{uuid.uuid4().hex[:8]}"
-    mock_send  = AsyncMock(return_value={"message_id": "msg-001", "thread_id": thread_id})
-    mock_pitch = _claude_pitch_response()
-
+    mock_send = AsyncMock()
     with patch("anthropic.Anthropic") as mock_claude, \
          patch("pitch_service.send_email", mock_send):
-        mock_claude.return_value.messages.create.return_value = mock_pitch
         r = client.post("/api/pitches/batch", json={
-            "artist_id":   ARTIST_ID,
+            "artist_id": ARTIST_ID,
             "curator_ids": [curator_id],
         })
-    assert r.status_code == 200, r.text
-    batch_result = r.json()
-    assert batch_result["sent"] == 1
-    assert batch_result["failed"] == 0
-    pitch_id = batch_result["pitch_ids"][0]
 
-    # ── Step 4: Assert pitch now has status=sent and thread_id recorded ───────
-    r = client.get(f"/api/pitches/{pitch_id}")
-    assert r.status_code == 200, r.text
-    pitch = r.json()
-    assert pitch["status"] == "sent"
-    assert pitch["gmail_thread_id"] == thread_id
-
-    # ── Step 5: Simulate inbox scan — one reply matching thread_id ────────────
-    gmail_svc       = mock_gmail_service(thread_id, generated["subject"], "Love it! I'm interested.")
-    classify_resp   = _claude_classify_response("positive")
-
-    with patch("pitch_service._get_gmail_service", return_value=gmail_svc), \
-         patch("anthropic.Anthropic") as mock_claude:
-        mock_claude.return_value.messages.create.return_value = classify_resp
-        r = client.post(f"/api/inbox/scan?artist_id={ARTIST_ID}")
-    assert r.status_code == 200, r.text
-    scan = r.json()
-    assert scan["scanned"] >= 1
-    assert scan["matched"] == 1
-    assert scan["classified"][0]["sentiment"] == "positive"
-
-    # ── Step 6: Assert pitch status=replied + interaction logged ──────────────
-    r = client.get(f"/api/pitches/{pitch_id}")
-    pitch = r.json()
-    assert pitch["status"] == "replied"
-
-    interactions = pitch.get("interactions", [])
-    assert any(i["direction"] == "inbound" for i in interactions), (
-        "Expected an inbound PitchInteraction after reply detection"
-    )
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["code"] == "durable_operation_required"
+    assert r.json()["detail"]["action_type"] == "gmail.send"
+    mock_claude.assert_not_called()
+    mock_send.assert_not_awaited()

@@ -504,11 +504,17 @@ class BatchPRRequest(BaseModel):
 
 @router.post("/api/pr-outreach/batch", tags=["pr"])
 async def send_pr_emails(req: BatchPRRequest):
-    """
-    For each contact: generate PR email, save outreach record (draft),
-    send via Gmail, update status to sent.
-    Returns {"sent": N, "failed": M, "errors": [...], "outreach_ids": [...]}.
-    """
+    """Legacy PR batch send is disabled because it bypasses durable approval."""
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "durable_operation_required",
+            "action_type": "gmail.send",
+            "message": "PR batch sending is disabled. Create and approve durable Gmail operations instead.",
+        },
+    )
+
+    # Unreachable legacy implementation retained temporarily for bounded migration.
     # Import send_email lazily to avoid circular import at module load
     from pitch_service import send_email, GmailNotConnected, GmailAuthExpired, _check_and_increment_quota
 

@@ -56,81 +56,41 @@ def _claude_classify_response(sentiment="positive"):
 
 # ── Lifecycle test ────────────────────────────────────────────────────────────
 
-def test_booking_lifecycle_full(client):
-    # ── Step 1: Create booking contact ───────────────────────────────────────
+def test_booking_draft_generation_and_legacy_batch_lockdown(client):
     r = client.post("/api/booking-contacts", json={
-        "name":          "Sam Torres",
-        "venue_name":    "The Test Venue",
-        "venue_type":    "club",
-        "city":          "Brooklyn",
-        "capacity":      500,
-        "genres":        ["indie", "alternative"],
-        "tier":          "B",
+        "name": "Sam Torres",
+        "venue_name": "The Test Venue",
+        "venue_type": "club",
+        "city": "Brooklyn",
+        "capacity": 500,
+        "genres": ["indie", "alternative"],
+        "tier": "B",
         "contact_email": "sam@testvenue.example.com",
     })
     assert r.status_code == 201, r.text
-    contact = r.json()
-    contact_id = contact["id"]
-    assert contact["tier"] == "B"
+    contact_id = r.json()["id"]
 
-    # ── Step 2: Generate booking email (Claude mocked) ────────────────────────
-    mock_resp = _claude_booking_response()
     with patch("anthropic.Anthropic") as mock_claude:
-        mock_claude.return_value.messages.create.return_value = mock_resp
+        mock_claude.return_value.messages.create.return_value = _claude_booking_response()
         r = client.post("/api/booking-inquiries/generate", json={
-            "artist_id":  ARTIST_ID,
+            "artist_id": ARTIST_ID,
             "contact_id": contact_id,
         })
+
     assert r.status_code == 200, r.text
-    generated = r.json()
-    assert "subject" in generated
-    assert "body" in generated
+    assert r.json()["subject"]
+    assert r.json()["body"]
 
-    # ── Step 3: Batch send (mocked Claude + mocked Gmail send) ────────────────
-    thread_id  = f"thread-booking-{uuid.uuid4().hex[:8]}"
-    mock_send  = AsyncMock(return_value={"message_id": "booking-msg-001", "thread_id": thread_id})
-    mock_email = _claude_booking_response()
-
+    mock_send = AsyncMock()
     with patch("anthropic.Anthropic") as mock_claude, \
          patch("pitch_service.send_email", mock_send):
-        mock_claude.return_value.messages.create.return_value = mock_email
         r = client.post("/api/booking-inquiries/batch", json={
-            "artist_id":   ARTIST_ID,
+            "artist_id": ARTIST_ID,
             "contact_ids": [contact_id],
         })
-    assert r.status_code == 200, r.text
-    batch_result = r.json()
-    assert batch_result["sent"] == 1
-    assert batch_result["failed"] == 0
-    inquiry_id = batch_result["inquiry_ids"][0]
 
-    # ── Step 4: Assert inquiry has status=sent + thread_id recorded ───────────
-    r = client.get(f"/api/booking-inquiries/{inquiry_id}")
-    assert r.status_code == 200, r.text
-    inquiry = r.json()
-    assert inquiry["status"] == "sent"
-    assert inquiry["gmail_thread_id"] == thread_id
-
-    # ── Step 5: Simulate inbox scan — one reply matching thread_id ────────────
-    gmail_svc     = mock_gmail_service(thread_id, generated["subject"], "We'd love to have you perform!")
-    classify_resp = _claude_classify_response("positive")
-
-    with patch("pitch_service._get_gmail_service", return_value=gmail_svc), \
-         patch("anthropic.Anthropic") as mock_claude:
-        mock_claude.return_value.messages.create.return_value = classify_resp
-        r = client.post(f"/api/booking-inquiries/scan?artist_id={ARTIST_ID}")
-    assert r.status_code == 200, r.text
-    scan = r.json()
-    assert scan["scanned"] >= 1
-    assert scan["matched"] == 1
-    assert scan["classified"][0]["sentiment"] == "positive"
-
-    # ── Step 6: Assert inquiry status=replied + interaction logged ────────────
-    r = client.get(f"/api/booking-inquiries/{inquiry_id}")
-    inquiry = r.json()
-    assert inquiry["status"] == "replied"
-
-    interactions = inquiry.get("interactions", [])
-    assert any(i["direction"] == "inbound" for i in interactions), (
-        "Expected an inbound BookingInteraction after reply detection"
-    )
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["code"] == "durable_operation_required"
+    assert r.json()["detail"]["action_type"] == "gmail.send"
+    mock_claude.assert_not_called()
+    mock_send.assert_not_awaited()

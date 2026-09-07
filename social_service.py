@@ -726,12 +726,16 @@ class BatchPostRequest(BaseModel):
 
 @router.post("/api/social/posts/batch", tags=["social"])
 async def schedule_posts(req: BatchPostRequest):
-    """
-    Generate req.posts_per_platform posts for each platform.
-    Space them evenly across the week starting from start_date.
-    Optionally schedule via Buffer (mocked).
-    Returns {"generated": N, "scheduled_via_buffer": M, "errors": [...], "post_ids": [...]}.
-    """
+    """Generate draft posts; consequential Buffer scheduling uses operations only."""
+    if req.schedule_buffer:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "durable_operation_required",
+                "action_type": "social.buffer.schedule",
+                "message": "Direct Buffer scheduling is disabled. Save drafts, then create/approve durable operations.",
+            },
+        )
     artist  = _load_artist_data(req.artist_id)
     results: dict = {
         "generated": 0,

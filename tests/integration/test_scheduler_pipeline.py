@@ -178,55 +178,54 @@ def test_sweep_batch_limit_caps_execution(tmp_path, monkeypatch):
     assert pending_count == 3, f"Expected 3 pending, got {pending_count}"
 
 
-def test_sweep_pitch_action_increments_anthropic_and_gmail_stats(sched_client):
-    """Real pitch action + curator + mocked API boundaries → both stat counters increment."""
+def test_scheduler_pitch_action_cannot_bypass_durable_operations(sched_client):
+    from unittest.mock import AsyncMock
+    """Scheduled pitch execution fails closed instead of directly sending Gmail."""
     import pitch_service
     from anthropic_utils import get_anthropic_stats
 
     r = sched_client.post("/api/curators", json={
-        "name":          "Test Curator",
-        "outlet":        "Scheduler Playlist",
-        "genres":        ["hip-hop"],
-        "tier":          "A",
+        "name": "Test Curator",
+        "outlet": "Scheduler Playlist",
+        "genres": ["hip-hop"],
+        "tier": "A",
         "contact_email": "sched@example.com",
     })
     assert r.status_code == 201
 
     future = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%d")
     r = sched_client.post("/api/releases", json={
-        "artist_id":    ARTIST_ID,
-        "title":        "Stats EP",
+        "artist_id": ARTIST_ID,
+        "title": "Stats EP",
         "release_date": future,
-        "genre":        "hip-hop",
-        "mood":         "focused",
+        "genre": "hip-hop",
+        "mood": "focused",
     })
     assert r.status_code == 200
     release_id = r.json()["id"]
-    action_id  = _insert_pending_action(sched_client._db, release_id, ARTIST_ID)
-
-    thread_id  = f"thread-{uuid.uuid4().hex[:8]}"
-    mock_gmail = make_send_gmail_svc(thread_id)
+    action_id = _insert_pending_action(sched_client._db, release_id, ARTIST_ID)
 
     before_anthropic = sum(v["total"] for v in get_anthropic_stats().values())
-    before_gmail     = sum(v["total"] for v in pitch_service.get_gmail_stats().values())
+    before_gmail = sum(v["total"] for v in pitch_service.get_gmail_stats().values())
 
-    with patch("anthropic.Anthropic") as mc, \
-         patch("pitch_service._get_gmail_service", return_value=mock_gmail):
-        mc.return_value.messages.create.return_value = _PITCH_DRAFT
+    mock_send = AsyncMock()
+    with patch("anthropic.Anthropic") as mock_anthropic, \
+         patch("pitch_service.send_email", mock_send):
         r = sched_client.post(f"/api/releases/{release_id}/campaign/execute-due")
 
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["executed"] == 1
-    assert data["actions"][0]["status"] == "done"
+    assert data["actions"][0]["status"] == "failed"
+    assert _get_action_status(sched_client._db, action_id) == "failed"
+    mock_anthropic.assert_not_called()
+    mock_send.assert_not_awaited()
 
     after_anthropic = sum(v["total"] for v in get_anthropic_stats().values())
-    after_gmail     = sum(v["total"] for v in pitch_service.get_gmail_stats().values())
+    after_gmail = sum(v["total"] for v in pitch_service.get_gmail_stats().values())
+    assert after_anthropic == before_anthropic
+    assert after_gmail == before_gmail
 
-    assert after_anthropic > before_anthropic, "anthropic_stats must increment after scheduler pitch action"
-    assert after_gmail     > before_gmail,     "gmail_stats must increment after scheduler pitch action"
-
-    assert _get_action_status(sched_client._db, action_id) == "done"
 
 
 def test_stuck_running_actions_reset_on_init(tmp_path):

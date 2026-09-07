@@ -56,80 +56,40 @@ def _claude_classify_response(sentiment="positive"):
 
 # ── Lifecycle test ────────────────────────────────────────────────────────────
 
-def test_pr_lifecycle_full(client):
-    # ── Step 1: Create PR contact ─────────────────────────────────────────────
+def test_pr_draft_generation_and_legacy_batch_lockdown(client):
     r = client.post("/api/pr-contacts", json={
-        "name":          "Alex Rivera",
-        "outlet_type":   "blog",
-        "outlet_name":   "Indie Pulse Blog",
-        "genres":        ["indie", "alternative"],
-        "tier":          "B",
+        "name": "Alex Rivera",
+        "outlet_type": "blog",
+        "outlet_name": "Indie Pulse Blog",
+        "genres": ["indie", "alternative"],
+        "tier": "B",
         "contact_email": "alex@indiepulse.example.com",
-        "beat":          "emerging artists",
+        "beat": "emerging artists",
     })
     assert r.status_code == 201, r.text
-    contact = r.json()
-    contact_id = contact["id"]
-    assert contact["tier"] == "B"
+    contact_id = r.json()["id"]
 
-    # ── Step 2: Generate PR email (Claude mocked) ─────────────────────────────
-    mock_resp = _claude_pr_response()
     with patch("anthropic.Anthropic") as mock_claude:
-        mock_claude.return_value.messages.create.return_value = mock_resp
+        mock_claude.return_value.messages.create.return_value = _claude_pr_response()
         r = client.post("/api/pr-outreach/generate", json={
-            "artist_id":  ARTIST_ID,
+            "artist_id": ARTIST_ID,
             "contact_id": contact_id,
         })
+
     assert r.status_code == 200, r.text
-    generated = r.json()
-    assert "subject" in generated
-    assert "body" in generated
+    assert r.json()["subject"]
+    assert r.json()["body"]
 
-    # ── Step 3: Batch send (mocked Claude + mocked Gmail send) ────────────────
-    thread_id  = f"thread-pr-{uuid.uuid4().hex[:8]}"
-    mock_send  = AsyncMock(return_value={"message_id": "pr-msg-001", "thread_id": thread_id})
-    mock_email = _claude_pr_response()
-
+    mock_send = AsyncMock()
     with patch("anthropic.Anthropic") as mock_claude, \
          patch("pitch_service.send_email", mock_send):
-        mock_claude.return_value.messages.create.return_value = mock_email
         r = client.post("/api/pr-outreach/batch", json={
-            "artist_id":   ARTIST_ID,
+            "artist_id": ARTIST_ID,
             "contact_ids": [contact_id],
         })
-    assert r.status_code == 200, r.text
-    batch_result = r.json()
-    assert batch_result["sent"] == 1
-    assert batch_result["failed"] == 0
-    outreach_id = batch_result["outreach_ids"][0]
 
-    # ── Step 4: Assert outreach has status=sent + thread_id recorded ──────────
-    r = client.get(f"/api/pr-outreach/{outreach_id}")
-    assert r.status_code == 200, r.text
-    outreach = r.json()
-    assert outreach["status"] == "sent"
-    assert outreach["gmail_thread_id"] == thread_id
-
-    # ── Step 5: Simulate inbox scan — one reply matching thread_id ────────────
-    gmail_svc     = mock_gmail_service(thread_id, generated["subject"], "Yes, I'd love to cover this!")
-    classify_resp = _claude_classify_response("positive")
-
-    with patch("pitch_service._get_gmail_service", return_value=gmail_svc), \
-         patch("anthropic.Anthropic") as mock_claude:
-        mock_claude.return_value.messages.create.return_value = classify_resp
-        r = client.post(f"/api/pr-outreach/scan?artist_id={ARTIST_ID}")
-    assert r.status_code == 200, r.text
-    scan = r.json()
-    assert scan["scanned"] >= 1
-    assert scan["matched"] == 1
-    assert scan["classified"][0]["sentiment"] == "positive"
-
-    # ── Step 6: Assert outreach status=replied + interaction logged ───────────
-    r = client.get(f"/api/pr-outreach/{outreach_id}")
-    outreach = r.json()
-    assert outreach["status"] == "replied"
-
-    interactions = outreach.get("interactions", [])
-    assert any(i["direction"] == "inbound" for i in interactions), (
-        "Expected an inbound PRInteraction after reply detection"
-    )
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["code"] == "durable_operation_required"
+    assert r.json()["detail"]["action_type"] == "gmail.send"
+    mock_claude.assert_not_called()
+    mock_send.assert_not_awaited()

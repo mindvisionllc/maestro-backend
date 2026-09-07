@@ -456,21 +456,19 @@ class SendEmailRequest(BaseModel):
 
 @router.post("/api/gmail/send", tags=["gmail"])
 async def api_send_email(req: SendEmailRequest):
-    """Send a one-off email via artist's connected Gmail account."""
-    try:
-        return await send_email(req.artist_id, req.to, req.subject, req.body)
-    except GmailNotConnected:
-        raise HTTPException(
-            status_code=403,
-            detail="Gmail not connected. Visit /api/gmail/auth?artist_id=... to connect.",
-        )
-    except GmailAuthExpired:
-        raise HTTPException(
-            status_code=403,
-            detail="Gmail auth expired. Re-connect at /api/gmail/auth?artist_id=...",
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    """Legacy direct-send route retained only as an explicit safety tripwire.
+
+    Consequential Gmail sends must be created, approved, and executed through
+    /api/operations so the durable approval/idempotency ledger cannot be bypassed.
+    """
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "durable_operation_required",
+            "action_type": "gmail.send",
+            "message": "Direct Gmail send is disabled. Use /api/operations, approve the operation, then execute it.",
+        },
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -860,13 +858,23 @@ class BatchPitchRequest(BaseModel):
 
 @router.post("/api/pitches/batch", tags=["pitches"])
 async def send_pitch_emails(req: BatchPitchRequest):
+    """Legacy batch send is disabled because it bypasses durable approval.
+
+    Generate drafts with /api/pitches/generate, then create one gmail.send
+    operation per approved recipient through /api/operations.
     """
-    For each curator_id:
-      1. generate_pitch_email()  → draft
-      2. _db_create_pitch()      → status=draft
-      3. send_email()            → status=sent
-    Returns {"sent": N, "failed": M, "errors": [...], "pitch_ids": [...]}.
-    """
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "durable_operation_required",
+            "action_type": "gmail.send",
+            "message": "Pitch batch sending is disabled. Create and approve durable Gmail operations instead.",
+        },
+    )
+
+    # Unreachable legacy implementation is intentionally left below for this
+    # bounded migration phase so behavior can be recovered from git history and
+    # removed separately after frontend migration is verified.
     _check_and_increment_quota(req.artist_id, len(req.curator_ids))
     artist  = _load_artist_data(req.artist_id)
     results: dict = {"sent": 0, "failed": 0, "errors": [], "pitch_ids": []}

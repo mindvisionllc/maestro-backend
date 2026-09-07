@@ -155,21 +155,26 @@ def test_generate_pr_email_returns_valid_shape(ps):
     assert "suggested_followup_days" in result
 
 
-def test_batch_pr_gmail_not_connected(ps):
+def test_legacy_batch_pr_is_blocked_before_gmail_access(ps):
+    import pytest
+
     _seed_pr_contact(ps)
-    with patch.object(ps, "_load_artist_data", return_value={"artist_name": "Test"}):
-        with patch("pitch_service._check_and_increment_quota"):  # bypass quota table
-            with patch("pitch_service.send_email", new=AsyncMock(side_effect=Exception("GmailNotConnected"))):
-                with patch.object(ps, "generate_pr_email", new=AsyncMock(
-                    return_value={"subject": "Test", "body": "Body", "suggested_followup_days": 7}
-                )):
-                    req = ps.BatchPRRequest(
-                        artist_id="artist-001",
-                        contact_ids=["pr-test-001"],
-                        release_context={},
-                    )
-                    result = asyncio.run(ps.send_pr_emails(req))
-    assert result["failed"] == 1
+    mock_send = AsyncMock()
+
+    with patch("pitch_service.send_email", new=mock_send):
+        req = ps.BatchPRRequest(
+            artist_id="artist-001",
+            contact_ids=["pr-test-001"],
+            release_context={},
+        )
+        with pytest.raises(Exception) as exc:
+            asyncio.run(ps.send_pr_emails(req))
+
+    assert getattr(exc.value, "status_code", None) == 409
+    assert exc.value.detail["code"] == "durable_operation_required"
+    assert exc.value.detail["action_type"] == "gmail.send"
+    mock_send.assert_not_awaited()
+
 
 
 def test_pr_followup_not_triggered_for_fresh_outreach(ps):

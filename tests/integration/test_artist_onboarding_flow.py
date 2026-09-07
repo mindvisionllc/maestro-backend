@@ -115,114 +115,85 @@ def test_pitch_generation_increments_anthropic_stats(client):
     assert after > before, "anthropic_stats.total must increase after pitch generation"
 
 
-def test_batch_send_increments_anthropic_and_gmail_stats(client):
-    """POST /api/pitches/batch runs real send_email path → both counters increment."""
+def test_legacy_pitch_batch_is_blocked_without_provider_or_model_usage(client):
+    from unittest.mock import AsyncMock
+    """Legacy pitch batch cannot bypass the durable operation ledger."""
     import pitch_service
     from anthropic_utils import get_anthropic_stats
 
     r = client.post("/api/curators", json={
-        "name": "River P.", "outlet": "New Wave Radio",
-        "genres": ["pop"], "tier": "A",
+        "name": "River P.",
+        "outlet": "New Wave Radio",
+        "genres": ["pop"],
+        "tier": "A",
         "contact_email": "river@example.com",
     })
     assert r.status_code == 201
     curator_id = r.json()["id"]
 
-    thread_id  = f"thread-{uuid.uuid4().hex[:8]}"
-    mock_gmail = make_send_gmail_svc(thread_id)
-
     before_anthropic = sum(v["total"] for v in get_anthropic_stats().values())
-    before_gmail     = sum(v["total"] for v in pitch_service.get_gmail_stats().values())
+    before_gmail = sum(v["total"] for v in pitch_service.get_gmail_stats().values())
 
-    with patch("anthropic.Anthropic") as mc, \
-         patch("pitch_service._get_gmail_service", return_value=mock_gmail):
-        mc.return_value.messages.create.return_value = _PITCH_DRAFT
+    with patch("anthropic.Anthropic") as mock_anthropic, \
+         patch("pitch_service.send_email", new=AsyncMock()) as mock_send:
         r = client.post("/api/pitches/batch", json={
-            "artist_id":   ARTIST_ID,
+            "artist_id": ARTIST_ID,
             "curator_ids": [curator_id],
         })
-    assert r.status_code == 200, r.text
-    assert r.json()["sent"] == 1
+
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert detail["code"] == "durable_operation_required"
+    assert detail["action_type"] == "gmail.send"
+    mock_anthropic.assert_not_called()
+    mock_send.assert_not_awaited()
 
     after_anthropic = sum(v["total"] for v in get_anthropic_stats().values())
-    after_gmail     = sum(v["total"] for v in pitch_service.get_gmail_stats().values())
+    after_gmail = sum(v["total"] for v in pitch_service.get_gmail_stats().values())
+    assert after_anthropic == before_anthropic
+    assert after_gmail == before_gmail
 
-    assert after_anthropic > before_anthropic, "anthropic_stats should increment after batch send"
-    assert after_gmail > before_gmail,         "gmail_stats should increment after batch send"
 
 
-def test_sent_pitch_retrievable_with_correct_status_and_thread_id(client):
-    """After batch send, GET /api/pitches/<id> returns status=sent and gmail_thread_id."""
+def test_pitch_draft_generation_remains_available(client):
+    """Draft generation remains safe while direct batch execution is blocked."""
     r = client.post("/api/curators", json={
-        "name": "Skye M.", "outlet": "Morning Mood",
-        "genres": ["acoustic"], "tier": "B",
+        "name": "Skye M.",
+        "outlet": "Morning Mood",
+        "genres": ["acoustic"],
+        "tier": "B",
         "contact_email": "skye@example.com",
     })
     assert r.status_code == 201
     curator_id = r.json()["id"]
 
-    thread_id  = f"thread-{uuid.uuid4().hex[:8]}"
-    mock_gmail = make_send_gmail_svc(thread_id)
-
-    with patch("anthropic.Anthropic") as mc, \
-         patch("pitch_service._get_gmail_service", return_value=mock_gmail):
-        mc.return_value.messages.create.return_value = _PITCH_DRAFT
-        r = client.post("/api/pitches/batch", json={
-            "artist_id":   ARTIST_ID,
-            "curator_ids": [curator_id],
+    with patch("anthropic.Anthropic") as mock_anthropic:
+        mock_anthropic.return_value.messages.create.return_value = _PITCH_DRAFT
+        r = client.post("/api/pitches/generate", json={
+            "artist_id": ARTIST_ID,
+            "curator_id": curator_id,
         })
-    assert r.status_code == 200
-    pitch_id = r.json()["pitch_ids"][0]
 
-    r = client.get(f"/api/pitches/{pitch_id}")
     assert r.status_code == 200, r.text
-    pitch = r.json()
-    assert pitch["status"] == "sent"
-    assert pitch["gmail_thread_id"] == thread_id
+    draft = r.json()
+    assert draft["subject"]
+    assert draft["body"]
 
 
-def test_inbox_scan_marks_pitch_replied(client):
-    """Full debrief: inbox scan with a matching curator reply updates pitch to replied."""
-    from anthropic_utils import get_anthropic_stats
 
-    r = client.post("/api/curators", json={
-        "name": "Dana K.", "outlet": "Folk & Indie Blog",
-        "genres": ["folk", "indie"], "tier": "B",
-        "contact_email": "dana@example.com",
-    })
-    assert r.status_code == 201
-    curator_id = r.json()["id"]
-
-    thread_id  = f"thread-{uuid.uuid4().hex[:8]}"
-    send_gmail = make_send_gmail_svc(thread_id)
-
-    with patch("anthropic.Anthropic") as mc, \
-         patch("pitch_service._get_gmail_service", return_value=send_gmail):
-        mc.return_value.messages.create.return_value = _PITCH_DRAFT
-        r = client.post("/api/pitches/batch", json={
-            "artist_id":   ARTIST_ID,
-            "curator_ids": [curator_id],
-        })
-    assert r.status_code == 200
-    pitch_id = r.json()["pitch_ids"][0]
-
+def test_inbox_scan_without_sent_pitch_does_not_create_a_match(client):
+    """Read-only inbox scanning remains available without manufacturing sent records."""
+    thread_id = f"thread-{uuid.uuid4().hex[:8]}"
     inbox_svc = mock_gmail_service(
         thread_id,
-        "First Pitch — Onboarding Artist",
+        "Unknown pitch",
         "Love it! Adding to the playlist.",
     )
-    before = sum(v["total"] for v in get_anthropic_stats().values())
 
     with patch("pitch_service._get_gmail_service", return_value=inbox_svc), \
-         patch("anthropic.Anthropic") as mc:
-        mc.return_value.messages.create.return_value = _CLASSIFY_POS
+         patch("anthropic.Anthropic") as mock_anthropic:
+        mock_anthropic.return_value.messages.create.return_value = _CLASSIFY_POS
         r = client.post(f"/api/inbox/scan?artist_id={ARTIST_ID}")
+
     assert r.status_code == 200, r.text
-    scan = r.json()
-    assert scan["matched"] == 1
-
-    after = sum(v["total"] for v in get_anthropic_stats().values())
-    assert after > before, "classify call should increment anthropic_stats"
-
-    r = client.get(f"/api/pitches/{pitch_id}")
-    assert r.json()["status"] == "replied"
+    assert r.json()["matched"] == 0

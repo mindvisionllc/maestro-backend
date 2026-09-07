@@ -224,7 +224,7 @@ def test_generate_pitch_email_returns_valid_shape(ps):
 # ── 1.6 sendPitchEmails() batch ──────────────────────────────────────────────
 
 def test_batch_pitch_gmail_not_connected(ps):
-    """When Gmail is not connected, all sends fail gracefully."""
+    """Legacy batch Gmail execution is blocked by the consequential-action safety boundary."""
     _seed_curator(ps)
     _seed_artist(ps)
 
@@ -247,14 +247,9 @@ def test_batch_pitch_gmail_not_connected(ps):
                 "track_metadata": {"name": "My Song"},
             })
 
-    assert resp.status_code == 200
+    assert resp.status_code == 409
     data = resp.json()
-    assert data["sent"]   == 0
-    assert data["failed"] == 1
-    assert len(data["errors"]) == 1
-
-
-# ── 1.9 Follow-up threshold logic ────────────────────────────────────────────
+    assert "detail" in data
 
 def test_followup_no_pitches(ps):
     """No sent pitches → empty list."""

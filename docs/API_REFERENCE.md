@@ -1137,3 +1137,10 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 - **Request body:** `agent` (string — agent slug), `query` (string — free-text need)
 - **Response:** 200 — `{ status, mock: bool, agent, home_domain (string|null), domains: [domain_key, ...], knowledge: "<assembled text, one section per domain>" }`
 - **Notes:** `BANK_CONSULT_MOCK_MODE=true` (default) returns the deterministic consult result directly; the flag only mirrors the assess-route shape — there is no live-LLM branch because retrieval needs none. Domains are routed by keyword over the catalog: the home domain (when the agent is paired) is always included and listed first, then any domain whose trigger keywords appear in the query, de-duplicated and capped at 4. A query with no keyword match and no home domain returns an empty `domains` list and empty `knowledge`. Knowledge text for each domain is assembled from `skills/maestro-<slug>/knowledge` in MANIFEST `load_order`, identical to the per-agent loaders.
+
+## Consequential action safety boundary
+
+Legacy direct execution routes are retained as explicit HTTP 409 tripwires for beta migration.
+Gmail sends and Buffer scheduling must use the durable `/api/operations` lifecycle:
+create -> approve -> execute (and reconcile when required). Batch pitch, PR, booking, and
+direct Buffer scheduling routes may generate/save drafts but may not dispatch providers.

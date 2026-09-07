@@ -159,21 +159,26 @@ def test_generate_booking_email_returns_valid_shape(bs):
     assert "suggested_followup_days" in result
 
 
-def test_batch_booking_gmail_not_connected(bs):
+def test_legacy_batch_booking_is_blocked_before_gmail_access(bs):
+    import pytest
+
     _seed_venue(bs)
-    with patch.object(bs, "_load_artist_data", return_value={"artist_name": "Test"}):
-        with patch("pitch_service._check_and_increment_quota"):  # bypass quota table
-            with patch("pitch_service.send_email", new=AsyncMock(side_effect=Exception("GmailNotConnected"))):
-                with patch.object(bs, "generate_booking_email", new=AsyncMock(
-                    return_value={"subject": "Test", "body": "Body", "suggested_followup_days": 14}
-                )):
-                    req = bs.BatchBookingRequest(
-                        artist_id="artist-001",
-                        contact_ids=["bk-test-001"],
-                        show_context={},
-                    )
-                    result = asyncio.run(bs.send_booking_emails(req))
-    assert result["failed"] == 1
+    mock_send = AsyncMock()
+
+    with patch("pitch_service.send_email", new=mock_send):
+        req = bs.BatchBookingRequest(
+            artist_id="artist-001",
+            contact_ids=["bk-test-001"],
+            show_context={},
+        )
+        with pytest.raises(Exception) as exc:
+            asyncio.run(bs.send_booking_emails(req))
+
+    assert getattr(exc.value, "status_code", None) == 409
+    assert exc.value.detail["code"] == "durable_operation_required"
+    assert exc.value.detail["action_type"] == "gmail.send"
+    mock_send.assert_not_awaited()
+
 
 
 def test_booking_followup_not_triggered_for_fresh_inquiry(bs):
