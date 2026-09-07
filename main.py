@@ -17,6 +17,15 @@ from typing import Optional
 
 # Boot: structured logging must be configured before any other module imports
 from logging_config import setup_logging, get_logger, bind_request_id
+from artist_identity import (
+    ArtistAuthError,
+    bearer_token,
+    decode_session,
+    identity_configured,
+    issue_session,
+    new_artist_id,
+    phone_fingerprint,
+)
 setup_logging()
 log = get_logger("main")
 
@@ -1404,9 +1413,33 @@ print("[INIT] DB ready, Kokoro warmup thread started, pitch/PR/booking/social se
 async def list_agents():
     return {"agents": AGENTS}
 
+
+def _authenticated_artist_id(request: Request) -> str:
+    """Return the signed artist principal when artist-session auth is configured."""
+    if not identity_configured():
+        return ""
+    try:
+        token = bearer_token(request.headers.get("Authorization", ""))
+        return decode_session(token)["sub"]
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+
+
+def _require_artist_scope(request: Request, claimed_artist_id: str) -> str:
+    """Fail closed when a signed artist attempts to access another artist."""
+    if not identity_configured():
+        return claimed_artist_id
+    principal = _authenticated_artist_id(request)
+    if not claimed_artist_id or not secrets.compare_digest(principal, claimed_artist_id):
+        raise HTTPException(status_code=404, detail="Artist resource not found")
+    return principal
+
+
 @app.get("/api/artist")
-async def get_artist(artist_id: str = ""):
-    return load_artist(artist_id)
+async def get_artist(request: Request, artist_id: str = ""):
+    scoped_artist_id = _require_artist_scope(request, artist_id)
+    return load_artist(scoped_artist_id)
+
 
 def _delete_transcription_temp(path: str):
     try:
@@ -13369,28 +13402,31 @@ class ArtistProfile(BaseModel):
     photo: Optional[str] = None
 
 @app.post("/api/artist/save")
-async def save_artist(profile: ArtistProfile):
+async def save_artist(profile: ArtistProfile, request: Request):
     try:
-        existing = load_artist(profile.artist_id)
+        scoped_artist_id = _require_artist_scope(request, profile.artist_id)
+        existing = load_artist(scoped_artist_id)
 
-        # Map app profile fields to the store format Maestro expects
         existing.update({
-            "artist_id":         profile.artist_id,
-            "artist_name":       profile.name,
-            "country":           profile.country,
-            "genres":            profile.genres,
+            "artist_id": scoped_artist_id,
+            "artist_name": profile.name,
+            "country": profile.country,
+            "genres": profile.genres,
             "monthly_listeners": profile.monthly_listeners,
-            "tier":              profile.tier,
-            "onboarded":         profile.onboarded,
-            "bio":               profile.bio,
-            "photo":             profile.photo,
+            "tier": profile.tier,
+            "onboarded": profile.onboarded,
+            "bio": profile.bio,
+            "photo": profile.photo,
         })
 
-        _save_artist_file(profile.artist_id, existing)
-        print(f"[ARTIST] Saved profile for {profile.name} ({profile.artist_id})")
-        return {"status": "ok", "artist_id": profile.artist_id}
+        _save_artist_file(scoped_artist_id, existing)
+        print(f"[ARTIST] Saved profile for {profile.name} ({scoped_artist_id})")
+        return {"status": "ok", "artist_id": scoped_artist_id}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 # ── Billing upgrade ────────────────────────────────────────────────────────────
@@ -13418,34 +13454,44 @@ async def billing_upgrade(payload: BillingUpgrade):
 
 # ── Conversation history read ──────────────────────────────────────────────────
 @app.get("/api/history")
-async def get_history(artist_id: str, agent_id: str):
+async def get_history(artist_id: str, agent_id: str, request: Request):
+    scoped_artist_id = _require_artist_scope(request, artist_id)
     try:
         if not DB_PATH.exists():
             return {"history": []}
         conn = sqlite3.connect(str(DB_PATH))
-        cur  = conn.cursor()
+        cur = conn.cursor()
         cur.execute(
-            "SELECT role, content FROM messages WHERE artist_id=? AND agent_id=? ORDER BY id ASC LIMIT 40",
-            (artist_id, agent_id)
+            "SELECT role, content FROM messages "
+            "WHERE artist_id=? AND agent_id=? ORDER BY id ASC LIMIT 40",
+            (scoped_artist_id, agent_id),
         )
         rows = cur.fetchall()
         conn.close()
-        return {"history": [{"role": r[0], "content": r[1]} for r in rows]}
+        return {"history": [{"role": row[0], "content": row[1]} for row in rows]}
     except Exception as e:
         print(f"[HISTORY] error: {e}")
         raise HTTPException(status_code=503, detail="Conversation history unavailable")
 
 
+
 # ── Artist lookup by name ──────────────────────────────────────────────────────
 @app.get("/api/artist/lookup")
-async def lookup_artist(name: str):
-    """Find existing artist profile by name (case-insensitive) across all artist profiles."""
+async def lookup_artist(name: str, request: Request):
+    """Return only the authenticated artist's own profile."""
     try:
-        target = name.lower().strip()
-        if DATABASE_URL:
+        if identity_configured():
+            artist_id = _authenticated_artist_id(request)
+            profile = load_artist(artist_id)
+            if profile.get("artist_name", "").lower() != name.lower().strip():
+                return {"found": False}
+            profiles = [profile]
+        elif DATABASE_URL:
             profiles = _pg_all()
         else:
             profiles = _sqlite_all_artists()
+
+        target = name.lower().strip()
         for profile in profiles:
             if profile.get("artist_name", "").lower() == target:
                 return {
@@ -13461,8 +13507,11 @@ async def lookup_artist(name: str):
                     "onboarded": profile.get("onboarded", False),
                 }
         return {"found": False}
+    except HTTPException:
+        raise
     except Exception as e:
         return {"found": False, "error": str(e)}
+
 
 
 # ── SMS OTP auth ───────────────────────────────────────────────────────────────
@@ -13556,12 +13605,15 @@ async def send_otp(payload: SendOtpRequest):
 
 @app.post("/api/auth/verify-otp")
 async def verify_otp(payload: VerifyOtpRequest):
-    """Verify a 6-digit OTP. Consumes the code on success."""
+    """Verify OTP and issue the canonical signed artist session."""
     phone = _normalize_phone(payload.phone)
     entry = _otp_store.get(phone)
 
     if not entry:
-        return {"valid": False, "reason": "No code found for this number. Please request a new code."}
+        return {
+            "valid": False,
+            "reason": "No code found for this number. Please request a new code.",
+        }
 
     if time.time() > entry["expires"]:
         del _otp_store[phone]
@@ -13571,7 +13623,57 @@ async def verify_otp(payload: VerifyOtpRequest):
         return {"valid": False, "reason": "Incorrect code. Try again."}
 
     del _otp_store[phone]
-    return {"valid": True}
+
+    # Preserve old local behavior until the two identity secrets are configured.
+    if not identity_configured():
+        return {"valid": True}
+
+    fingerprint = phone_fingerprint(phone)
+    matching_profile = None
+
+    profiles = _pg_all() if DATABASE_URL else _sqlite_all_artists()
+    for profile in profiles:
+        if secrets.compare_digest(
+            str(profile.get("identity_phone_hash", "")),
+            fingerprint,
+        ):
+            matching_profile = profile
+            break
+
+    if matching_profile:
+        artist_id = matching_profile["artist_id"]
+        profile = matching_profile
+        returning_artist = bool(profile.get("onboarded"))
+    else:
+        artist_id = new_artist_id()
+        profile = {
+            "artist_id": artist_id,
+            "identity_phone_hash": fingerprint,
+            "phone_verified_at": int(time.time()),
+            "onboarded": False,
+        }
+        _save_artist_file(artist_id, profile)
+        returning_artist = False
+
+    session = issue_session(artist_id)
+    return {
+        "valid": True,
+        "artist_id": artist_id,
+        "returning_artist": returning_artist,
+        "profile": {
+            "artist_id": artist_id,
+            "name": profile.get("artist_name", ""),
+            "tier": profile.get("tier", "Gold"),
+            "genres": profile.get("genres", []),
+            "country": profile.get("country", ""),
+            "monthly_listeners": profile.get("monthly_listeners", ""),
+            "bio": profile.get("bio", ""),
+            "photo": profile.get("photo"),
+            "onboarded": bool(profile.get("onboarded")),
+        },
+        **session,
+    }
+
 
 
 # ── Push notifications ─────────────────────────────────────────────────────────

@@ -1144,3 +1144,22 @@ Legacy direct execution routes are retained as explicit HTTP 409 tripwires for b
 Gmail sends and Buffer scheduling must use the durable `/api/operations` lifecycle:
 create -> approve -> execute (and reconcile when required). Batch pitch, PR, booking, and
 direct Buffer scheduling routes may generate/save drafts but may not dispatch providers.
+
+## Authenticated artist identity
+
+When `PLMKR_SESSION_SECRET` and `PLMKR_IDENTITY_SECRET` are configured,
+successful `POST /api/auth/verify-otp` responses include a server-owned
+`artist_id`, signed Bearer `access_token`, `expires_in`, `expires_at`,
+`returning_artist`, and the authenticated artist profile.
+
+Phone numbers are bound to artist accounts using an HMAC fingerprint. Raw phone
+numbers are not embedded in artist IDs. Authenticated artist profile, history,
+and name-lookup routes reject cross-artist access with HTTP 404 and reject
+missing, invalid, or expired artist sessions with HTTP 401.
+
+Clients send the session as:
+
+`Authorization: Bearer <access_token>`
+
+The shared `X-API-Key` remains a separate application-level boundary during the
+migration and is not an artist identity.
