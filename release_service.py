@@ -7,6 +7,7 @@ No new external APIs — delegates to pitch_service, pr_service, booking_service
 """
 
 import os
+from artist_identity import ArtistAuthError, require_artist_scope
 import json
 import uuid
 import logging
@@ -14,7 +15,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 log = logging.getLogger("release_service")
@@ -417,15 +418,19 @@ class PatchReleaseRequest(BaseModel):
 
 
 @router.post("/api/releases", tags=["releases"])
-def create_release(req: CreateReleaseRequest):
+def create_release(req: CreateReleaseRequest, request: Request = None):
     """Create a new release."""
+    try:
+        artist_id = require_artist_scope(request, req.artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     try:
         datetime.fromisoformat(req.release_date)
     except ValueError:
         raise HTTPException(status_code=400, detail="release_date must be YYYY-MM-DD")
     release = {
         "id":           str(uuid.uuid4()),
-        "artist_id":    req.artist_id,
+        "artist_id":    artist_id,
         "title":        req.title,
         "release_date": req.release_date,
         "genre":        req.genre or "",
@@ -433,32 +438,44 @@ def create_release(req: CreateReleaseRequest):
         "status":       "draft",
     }
     _db_create_release(release)
-    log.info("release_created", extra={"artist_id": req.artist_id,
+    log.info("release_created", extra={"artist_id": artist_id,
              "release_id": release["id"], "action": "create_release"})
     return release
 
 
 @router.get("/api/releases", tags=["releases"])
-def list_releases(artist_id: str):
+def list_releases(artist_id: str, request: Request = None):
     """List all releases for an artist."""
+    try:
+        artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     return {"releases": _db_list_releases(artist_id)}
 
 
 @router.get("/api/releases/{release_id}", tags=["releases"])
-def get_release(release_id: str):
+def get_release(release_id: str, request: Request = None):
     """Get a single release."""
     r = _db_get_release(release_id)
     if not r:
         raise HTTPException(status_code=404, detail="Release not found")
+    try:
+        require_artist_scope(request, r["artist_id"])
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     return r
 
 
 @router.patch("/api/releases/{release_id}", tags=["releases"])
-def patch_release(release_id: str, req: PatchReleaseRequest):
+def patch_release(release_id: str, req: PatchReleaseRequest, request: Request = None):
     """Update release fields."""
     r = _db_get_release(release_id)
     if not r:
         raise HTTPException(status_code=404, detail="Release not found")
+    try:
+        require_artist_scope(request, r["artist_id"])
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     updates = {k: v for k, v in req.model_dump().items() if v is not None}
     if not updates:
         return r
@@ -472,7 +489,7 @@ def patch_release(release_id: str, req: PatchReleaseRequest):
 
 
 @router.post("/api/releases/{release_id}/generate-campaign", tags=["releases"])
-def generate_campaign(release_id: str):
+def generate_campaign(release_id: str, request: Request = None):
     """
     Generate campaign_actions for a release. Idempotent — clears existing
     pending actions and regenerates from the current release_date.
@@ -480,6 +497,10 @@ def generate_campaign(release_id: str):
     r = _db_get_release(release_id)
     if not r:
         raise HTTPException(status_code=404, detail="Release not found")
+    try:
+        require_artist_scope(request, r["artist_id"])
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
     # Clear existing pending actions
     conn = _conn()
@@ -502,11 +523,15 @@ def generate_campaign(release_id: str):
 
 
 @router.get("/api/releases/{release_id}/campaign", tags=["releases"])
-def get_campaign(release_id: str):
+def get_campaign(release_id: str, request: Request = None):
     """List all campaign actions for a release."""
     r = _db_get_release(release_id)
     if not r:
         raise HTTPException(status_code=404, detail="Release not found")
+    try:
+        require_artist_scope(request, r["artist_id"])
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     actions = _db_list_actions(release_id)
     return {"release_id": release_id, "actions": actions,
             "counts": {
@@ -518,7 +543,7 @@ def get_campaign(release_id: str):
 
 
 @router.post("/api/releases/{release_id}/campaign/execute-due", tags=["releases"])
-async def execute_due_actions(release_id: str):
+async def execute_due_actions(release_id: str, request: Request = None):
     """
     Execute all campaign actions for this release that are due (scheduled_for <= now).
     Updates action status to done/failed with result.
@@ -526,6 +551,10 @@ async def execute_due_actions(release_id: str):
     r = _db_get_release(release_id)
     if not r:
         raise HTTPException(status_code=404, detail="Release not found")
+    try:
+        require_artist_scope(request, r["artist_id"])
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
     all_due = _db_list_due_actions()
     due     = [a for a in all_due if a["release_id"] == release_id]

@@ -1171,3 +1171,8 @@ not an artist identity. OTP bootstrap routes do not require it. A valid artist
 Bearer session satisfies middleware for customer API requests. Gmail and Buffer
 callbacks rely on signed OAuth state, while the Stripe webhook relies on its
 provider signature.
+
+OTP requests are throttled per normalized phone number with a resend cooldown
+and rolling send window. Repeated incorrect verification attempts invalidate
+the current code and require a new OTP. Release and campaign routes enforce the
+same signed artist ownership boundary as other artist resources.

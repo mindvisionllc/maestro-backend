@@ -1107,6 +1107,7 @@ async def _http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail, "request_id": get_request_id() or str(uuid.uuid4())},
+        headers=exc.headers,
     )
 
 
@@ -13540,7 +13541,12 @@ async def lookup_artist(name: str, request: Request):
 # ── SMS OTP auth ───────────────────────────────────────────────────────────────
 # In-memory store: { normalized_phone: { "otp": "123456", "expires": float } }
 _otp_store: dict = {}
+_otp_send_history: dict[str, list[float]] = {}
 OTP_EXPIRY_SECONDS = 600  # 10 minutes
+OTP_SEND_COOLDOWN_SECONDS = int(os.environ.get("PLMKR_OTP_SEND_COOLDOWN_SECONDS", "60"))
+OTP_SEND_WINDOW_SECONDS = int(os.environ.get("PLMKR_OTP_SEND_WINDOW_SECONDS", "3600"))
+OTP_MAX_SENDS_PER_WINDOW = int(os.environ.get("PLMKR_OTP_MAX_SENDS_PER_WINDOW", "5"))
+OTP_MAX_VERIFY_ATTEMPTS = int(os.environ.get("PLMKR_OTP_MAX_VERIFY_ATTEMPTS", "5"))
 
 
 def _normalize_phone(raw: str) -> str:
@@ -13554,6 +13560,33 @@ def _clean_otp_store():
     expired = [k for k, v in _otp_store.items() if v["expires"] < now]
     for k in expired:
         del _otp_store[k]
+    cutoff = now - OTP_SEND_WINDOW_SECONDS
+    for phone, sent_times in list(_otp_send_history.items()):
+        recent = [sent_at for sent_at in sent_times if sent_at > cutoff]
+        if recent:
+            _otp_send_history[phone] = recent
+        else:
+            del _otp_send_history[phone]
+
+
+def _record_otp_send(phone: str) -> None:
+    now = time.time()
+    sent_times = _otp_send_history.setdefault(phone, [])
+    if sent_times and now - sent_times[-1] < OTP_SEND_COOLDOWN_SECONDS:
+        retry_after = max(1, int(OTP_SEND_COOLDOWN_SECONDS - (now - sent_times[-1])))
+        raise HTTPException(
+            status_code=429,
+            detail="Please wait before requesting another verification code.",
+            headers={"Retry-After": str(retry_after)},
+        )
+    if len(sent_times) >= OTP_MAX_SENDS_PER_WINDOW:
+        retry_after = max(1, int(sent_times[0] + OTP_SEND_WINDOW_SECONDS - now))
+        raise HTTPException(
+            status_code=429,
+            detail="Too many verification codes requested. Please try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+    sent_times.append(now)
 
 
 class SendOtpRequest(BaseModel):
@@ -13574,11 +13607,16 @@ async def send_otp(payload: SendOtpRequest):
         phone = _normalize_phone(payload.phone)
         if len(phone) < 8:
             raise HTTPException(status_code=400, detail="Invalid phone number")
+        _record_otp_send(phone)
 
         # R-17 dev bypass: skip Twilio and store a fixed dev code
         if SMS_OTP_DEV_BYPASS:
             dev_otp = "000000"
-            _otp_store[phone] = {"otp": dev_otp, "expires": time.time() + OTP_EXPIRY_SECONDS}
+            _otp_store[phone] = {
+                "otp": dev_otp,
+                "expires": time.time() + OTP_EXPIRY_SECONDS,
+                "attempts": 0,
+            }
             log.warning("boot_warning", extra={
                 "event":  "boot_warning",
                 "key":    "SMS_OTP_DEV_BYPASS",
@@ -13606,7 +13644,11 @@ async def send_otp(payload: SendOtpRequest):
             )
 
         otp = str(secrets.randbelow(1000000)).zfill(6)
-        _otp_store[phone] = {"otp": otp, "expires": time.time() + OTP_EXPIRY_SECONDS}
+        _otp_store[phone] = {
+            "otp": otp,
+            "expires": time.time() + OTP_EXPIRY_SECONDS,
+            "attempts": 0,
+        }
 
         from twilio.rest import Client as TwilioClient
         twilio = TwilioClient(account_sid, auth_token)
@@ -13643,6 +13685,13 @@ async def verify_otp(payload: VerifyOtpRequest):
         return {"valid": False, "reason": "Code expired. Please request a new one."}
 
     if entry["otp"] != payload.code.strip():
+        entry["attempts"] = int(entry.get("attempts", 0)) + 1
+        if entry["attempts"] >= OTP_MAX_VERIFY_ATTEMPTS:
+            del _otp_store[phone]
+            return {
+                "valid": False,
+                "reason": "Too many incorrect attempts. Please request a new code.",
+            }
         return {"valid": False, "reason": "Incorrect code. Try again."}
 
     del _otp_store[phone]

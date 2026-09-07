@@ -23,6 +23,8 @@ def identity_client(monkeypatch, tmp_path):
     monkeypatch.setenv("PLMKR_SESSION_SECRET", SESSION_SECRET)
     monkeypatch.setenv("PLMKR_IDENTITY_SECRET", IDENTITY_SECRET)
     monkeypatch.setenv("SMS_OTP_DEV_BYPASS", "true")
+    monkeypatch.setenv("PLMKR_OTP_SEND_COOLDOWN_SECONDS", "0")
+    monkeypatch.setenv("PLMKR_OTP_MAX_SENDS_PER_WINDOW", "100")
     monkeypatch.delenv("RAILWAY_ENVIRONMENT", raising=False)
 
     # Service modules may already be cached by pytest with the default /data path.
@@ -36,6 +38,7 @@ def identity_client(monkeypatch, tmp_path):
         "booking_service",
         "social_service",
         "execution_service",
+        "release_service",
     ):
         module = sys.modules.get(module_name)
         if module is not None and hasattr(module, "_DB_PATH"):
@@ -92,6 +95,43 @@ def test_bearer_session_satisfies_customer_middleware_without_api_key(identity_c
         headers={"Authorization": f"Bearer {artist['access_token']}"},
     )
     assert response.status_code == 200, response.text
+
+
+def test_otp_attempt_limit_invalidates_code(identity_client, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "OTP_MAX_VERIFY_ATTEMPTS", 3)
+    phone = "+1 555 103 9999"
+    sent = identity_client.post("/api/auth/send-otp", json={"phone": phone})
+    assert sent.status_code == 200, sent.text
+
+    for attempt in range(3):
+        response = identity_client.post(
+            "/api/auth/verify-otp",
+            json={"phone": phone, "code": "111111"},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["valid"] is False
+
+    correct_after_lockout = identity_client.post(
+        "/api/auth/verify-otp",
+        json={"phone": phone, "code": "000000"},
+    )
+    assert correct_after_lockout.json()["valid"] is False
+    assert "request a new code" in correct_after_lockout.json()["reason"].lower()
+
+
+def test_otp_send_cooldown_returns_retry_after(identity_client, monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "OTP_SEND_COOLDOWN_SECONDS", 60)
+    phone = "+1 555 104 9999"
+    first = identity_client.post("/api/auth/send-otp", json={"phone": phone})
+    second = identity_client.post("/api/auth/send-otp", json={"phone": phone})
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 429, second.text
+    assert int(second.headers["Retry-After"]) > 0
 
 
 def headers(session):
@@ -339,6 +379,40 @@ def test_cross_artist_campaign_resources_are_not_addressable_by_id(identity_clie
         headers=artist_a_headers,
     )
     assert billing.status_code == 404, billing.text
+
+
+def test_cross_artist_release_and_campaign_resources_are_denied(identity_client):
+    artist_a = login(identity_client, "+1 555 901 0001")
+    artist_b = login(identity_client, "+1 555 901 0002")
+
+    created = identity_client.post(
+        "/api/releases",
+        json={
+            "artist_id": artist_b["artist_id"],
+            "title": "Private Release",
+            "release_date": "2026-10-30",
+            "genre": "pop",
+        },
+        headers=headers(artist_b),
+    )
+    assert created.status_code == 200, created.text
+    release_id = created.json()["id"]
+
+    cases = (
+        ("get", f"/api/releases?artist_id={artist_b['artist_id']}", {}),
+        ("get", f"/api/releases/{release_id}", {}),
+        ("patch", f"/api/releases/{release_id}", {"json": {"title": "Stolen"}}),
+        ("post", f"/api/releases/{release_id}/generate-campaign", {}),
+        ("get", f"/api/releases/{release_id}/campaign", {}),
+        ("post", f"/api/releases/{release_id}/campaign/execute-due", {}),
+    )
+    for method, path, kwargs in cases:
+        response = getattr(identity_client, method)(
+            path,
+            headers=headers(artist_a),
+            **kwargs,
+        )
+        assert response.status_code == 404, (method, path, response.text)
 
 
 def test_signed_oauth_state_is_artist_and_provider_bound(identity_client):
