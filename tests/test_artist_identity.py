@@ -1,4 +1,5 @@
 import importlib
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -23,6 +24,22 @@ def identity_client(monkeypatch, tmp_path):
     monkeypatch.setenv("PLMKR_IDENTITY_SECRET", IDENTITY_SECRET)
     monkeypatch.setenv("SMS_OTP_DEV_BYPASS", "true")
     monkeypatch.delenv("RAILWAY_ENVIRONMENT", raising=False)
+
+    # Service modules may already be cached by pytest with the default /data path.
+    # Point every cached local service at this test's isolated database before
+    # main reload invokes their initialization functions.
+    import sys
+    isolated_db = Path(tmp_path / "identity.db")
+    for module_name in (
+        "pitch_service",
+        "pr_service",
+        "booking_service",
+        "social_service",
+        "execution_service",
+    ):
+        module = sys.modules.get(module_name)
+        if module is not None and hasattr(module, "_DB_PATH"):
+            monkeypatch.setattr(module, "_DB_PATH", isolated_db)
 
     with patch("whisper.load_model", return_value=MagicMock()):
         import main
@@ -142,3 +159,98 @@ def test_missing_invalid_and_expired_sessions_fail_closed(identity_client):
         headers=tampered,
     )
     assert invalid.status_code == 401
+
+def test_cross_artist_operations_gmail_buffer_and_notifications_are_denied(
+    identity_client,
+):
+    artist_a = login(identity_client, "+1 555 601 0001")
+    artist_b = login(identity_client, "+1 555 601 0002")
+    artist_a_headers = headers(artist_a)
+    artist_b_id = artist_b["artist_id"]
+
+    operation = identity_client.post(
+        "/api/operations",
+        json={
+            "artist_id": artist_b_id,
+            "action_type": "gmail.send",
+            "idempotency_key": "cross-artist-operation",
+            "payload": {
+                "to": "recipient@example.com",
+                "subject": "Blocked",
+                "body": "Blocked",
+            },
+        },
+        headers=artist_a_headers,
+    )
+    assert operation.status_code == 404, operation.text
+
+    gmail = identity_client.get(
+        f"/api/gmail/status?artist_id={artist_b_id}",
+        headers=artist_a_headers,
+    )
+    assert gmail.status_code == 404, gmail.text
+
+    buffer_status = identity_client.get(
+        f"/api/buffer/status?artist_id={artist_b_id}",
+        headers=artist_a_headers,
+    )
+    assert buffer_status.status_code == 404, buffer_status.text
+
+    buffer_profiles = identity_client.get(
+        f"/api/buffer/profiles?artist_id={artist_b_id}",
+        headers=artist_a_headers,
+    )
+    assert buffer_profiles.status_code == 404, buffer_profiles.text
+
+    register = identity_client.post(
+        "/api/notifications/register",
+        json={
+            "artist_id": artist_b_id,
+            "push_token": "ExponentPushToken[cross-artist]",
+        },
+        headers=artist_a_headers,
+    )
+    assert register.status_code == 404, register.text
+
+    notifications = identity_client.get(
+        f"/api/notifications/{artist_b_id}",
+        headers=artist_a_headers,
+    )
+    assert notifications.status_code == 404, notifications.text
+
+    notification_send = identity_client.post(
+        "/api/notifications/send",
+        json={
+            "artist_id": artist_b_id,
+            "title": "Blocked",
+            "body": "Cross-artist notification must not be sent",
+        },
+        headers=artist_a_headers,
+    )
+    assert notification_send.status_code == 404, notification_send.text
+
+    billing = identity_client.post(
+        "/api/billing/upgrade",
+        json={"artist_id": artist_b_id, "tier": "Platinum"},
+        headers=artist_a_headers,
+    )
+    assert billing.status_code == 404, billing.text
+
+
+def test_signed_oauth_state_is_artist_and_provider_bound(identity_client):
+    from artist_identity import (
+        ArtistAuthError,
+        decode_oauth_state,
+        issue_oauth_state,
+    )
+
+    artist = login(identity_client, "+1 555 602 0001")
+    state = issue_oauth_state(artist["artist_id"], "gmail")
+
+    assert decode_oauth_state(state, "gmail") == artist["artist_id"]
+
+    with pytest.raises(ArtistAuthError):
+        decode_oauth_state(state, "buffer")
+
+    with pytest.raises(ArtistAuthError):
+        decode_oauth_state(state + "tampered", "gmail")

@@ -1,3 +1,4 @@
+from fastapi import Request
 """
 PLMKR Social Service — Phase 3
 Handles social post scheduling (Buffer API), Riley persona post generation,
@@ -8,6 +9,13 @@ Tables always live in SQLite. Buffer tokens stored in artist profile.
 """
 
 import asyncio
+from artist_identity import (
+    ArtistAuthError,
+    decode_oauth_state,
+    identity_configured,
+    issue_oauth_state,
+    require_artist_scope,
+)
 import os
 import re
 import json
@@ -397,53 +405,93 @@ class BufferNotConnected(Exception):
 
 
 @router.get("/api/buffer/auth", tags=["buffer"])
-def buffer_auth(artist_id: str):
-    """Redirect artist to Buffer OAuth consent screen."""
+def buffer_auth(artist_id: str, request: Request = None):
+    """Redirect the authenticated artist to Buffer OAuth."""
+    try:
+        scoped_artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
     if not _BUFFER_CLIENT_ID:
-        raise HTTPException(status_code=503, detail="BUFFER_CLIENT_ID not configured")
+        raise HTTPException(
+            status_code=503,
+            detail="BUFFER_CLIENT_ID not configured",
+        )
+
+    state = (
+        issue_oauth_state(scoped_artist_id, "buffer")
+        if identity_configured()
+        else scoped_artist_id
+    )
     params = urlencode({
-        "client_id":     _BUFFER_CLIENT_ID,
-        "redirect_uri":  _BUFFER_REDIRECT_URI,
+        "client_id": _BUFFER_CLIENT_ID,
+        "redirect_uri": _BUFFER_REDIRECT_URI,
         "response_type": "code",
-        "state":         artist_id,
+        "state": state,
     })
     return RedirectResponse(url=f"{_BUFFER_AUTH_URL}?{params}")
 
 
+
 @router.get("/api/buffer/callback", tags=["buffer"])
 async def buffer_callback(code: str, state: str):
-    """Handle Buffer OAuth callback — exchange code for access token and store it."""
+    """Exchange Buffer code using signed artist-bound state."""
     if not _BUFFER_CLIENT_SECRET:
-        raise HTTPException(status_code=503, detail="Buffer OAuth not configured")
-    artist_id = state
+        raise HTTPException(
+            status_code=503,
+            detail="Buffer OAuth not configured",
+        )
+
+    try:
+        artist_id = (
+            decode_oauth_state(state, "buffer")
+            if identity_configured()
+            else state
+        )
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.post(
+            response = await client.post(
                 _BUFFER_TOKEN_URL,
                 data={
-                    "client_id":     _BUFFER_CLIENT_ID,
+                    "client_id": _BUFFER_CLIENT_ID,
                     "client_secret": _BUFFER_CLIENT_SECRET,
-                    "redirect_uri":  _BUFFER_REDIRECT_URI,
-                    "code":          code,
-                    "grant_type":    "authorization_code",
+                    "redirect_uri": _BUFFER_REDIRECT_URI,
+                    "code": code,
+                    "grant_type": "authorization_code",
                 },
                 timeout=15,
             )
-        tokens = resp.json()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Buffer token exchange failed: {e}")
+        tokens = response.json()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Buffer token exchange failed: {exc}",
+        )
 
     _save_buffer_tokens(artist_id, {
         "access_token": tokens.get("access_token"),
-        "stored_at":    datetime.now(timezone.utc).isoformat(),
+        "stored_at": datetime.now(timezone.utc).isoformat(),
     })
     return {"status": "connected", "artist_id": artist_id}
 
 
+
 @router.get("/api/buffer/status", tags=["buffer"])
-def buffer_status(artist_id: str):
-    tokens = _load_buffer_tokens(artist_id)
-    return {"connected": bool(tokens.get("access_token")), "artist_id": artist_id}
+def buffer_status(artist_id: str, request: Request = None):
+    try:
+        scoped_artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    tokens = _load_buffer_tokens(scoped_artist_id)
+    return {
+        "connected": bool(tokens.get("access_token")),
+        "artist_id": scoped_artist_id,
+    }
+
 
 
 async def _buffer_list_profiles(artist_id: str) -> list[dict]:
@@ -479,15 +527,24 @@ async def _buffer_list_profiles(artist_id: str) -> list[dict]:
 
 
 @router.get("/api/buffer/profiles", tags=["buffer"])
-async def buffer_profiles(artist_id: str):
+async def buffer_profiles(artist_id: str, request: Request = None):
     try:
-        profiles = await _buffer_list_profiles(artist_id)
+        scoped_artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    try:
+        profiles = await _buffer_list_profiles(scoped_artist_id)
     except BufferNotConnected:
-        raise HTTPException(status_code=409, detail="Buffer account not connected")
+        raise HTTPException(
+            status_code=409,
+            detail="Buffer account not connected",
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
-    return {"artist_id": artist_id, "profiles": profiles}
+    return {"artist_id": scoped_artist_id, "profiles": profiles}
+
 
 
 async def _buffer_post_real(

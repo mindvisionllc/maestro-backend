@@ -1,3 +1,4 @@
+from fastapi import Request
 """
 PLMKR Pitch Service — Phase 1 Core Action Layer
 Handles Gmail OAuth, email sending, curator DB, pitch generation + tracking, inbox scanning.
@@ -8,6 +9,13 @@ Gmail tokens live inside the artist profile (follows main.py Postgres/SQLite rou
 """
 
 import os
+from artist_identity import (
+    ArtistAuthError,
+    decode_oauth_state,
+    identity_configured,
+    issue_oauth_state,
+    require_artist_scope,
+)
 import re
 import json
 import uuid
@@ -218,61 +226,104 @@ def _build_flow():
 
 
 @router.get("/api/gmail/auth", tags=["gmail"])
-def gmail_auth(artist_id: str):
-    """Redirect artist to Google OAuth consent screen."""
+def gmail_auth(artist_id: str, request: Request = None):
+    """Redirect the authenticated artist to Google OAuth."""
+    try:
+        scoped_artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
     if not (_GMAIL_CLIENT_ID and _GMAIL_CLIENT_SECRET and _GMAIL_REDIRECT_URI):
         raise HTTPException(
             status_code=503,
             detail="Gmail OAuth not configured — set GMAIL_OAUTH_CLIENT_ID, "
-                   "GMAIL_OAUTH_CLIENT_SECRET, GMAIL_OAUTH_REDIRECT_URI on Railway.",
+                   "GMAIL_OAUTH_CLIENT_SECRET, GMAIL_REDIRECT_URI on Railway.",
         )
+
     try:
         flow = _build_flow()
         flow.redirect_uri = _GMAIL_REDIRECT_URI
+        state = (
+            issue_oauth_state(scoped_artist_id, "gmail")
+            if identity_configured()
+            else scoped_artist_id
+        )
         auth_url, _ = flow.authorization_url(
             access_type="offline",
             prompt="consent",
-            state=artist_id,
+            state=state,
         )
         return RedirectResponse(auth_url)
     except ImportError:
-        raise HTTPException(status_code=503, detail="google-auth-oauthlib not installed")
+        raise HTTPException(
+            status_code=503,
+            detail="google-auth-oauthlib not installed",
+        )
+
 
 
 @router.get("/api/gmail/callback", tags=["gmail"])
 def gmail_callback(code: str, state: str):
-    """Exchange OAuth code for tokens and persist in artist profile."""
-    artist_id = state
+    """Exchange OAuth code using signed artist-bound state."""
+    try:
+        artist_id = (
+            decode_oauth_state(state, "gmail")
+            if identity_configured()
+            else state
+        )
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     if not artist_id:
-        raise HTTPException(status_code=400, detail="Missing artist_id in OAuth state")
+        raise HTTPException(status_code=400, detail="Missing artist OAuth state")
+
     try:
         flow = _build_flow()
         flow.redirect_uri = _GMAIL_REDIRECT_URI
         flow.fetch_token(code=code)
         creds = flow.credentials
         tokens = {
-            "access_token":  creds.token,
+            "access_token": creds.token,
             "refresh_token": creds.refresh_token,
-            "expires_at":    creds.expiry.isoformat() if creds.expiry else None,
-            "token_uri":     creds.token_uri,
-            "client_id":     creds.client_id,
+            "expires_at": creds.expiry.isoformat() if creds.expiry else None,
+            "token_uri": creds.token_uri,
+            "client_id": creds.client_id,
             "client_secret": creds.client_secret,
-            "scopes":        list(creds.scopes) if creds.scopes else _GMAIL_SCOPES,
+            "scopes": list(creds.scopes) if creds.scopes else _GMAIL_SCOPES,
         }
         _save_gmail_tokens(artist_id, tokens)
-        log.info("gmail_tokens_saved", extra={"event": "gmail_tokens_saved", "artist_id": artist_id})
+        log.info(
+            "gmail_tokens_saved",
+            extra={"event": "gmail_tokens_saved", "artist_id": artist_id},
+        )
         return {"status": "connected", "artist_id": artist_id}
     except ImportError:
-        raise HTTPException(status_code=503, detail="google-auth-oauthlib not installed")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"OAuth callback failed: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="google-auth-oauthlib not installed",
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"OAuth callback failed: {exc}",
+        )
+
 
 
 @router.get("/api/gmail/status", tags=["gmail"])
-def gmail_status(artist_id: str):
-    """Return whether artist has active Gmail tokens."""
-    tokens = _load_gmail_tokens(artist_id)
-    return {"connected": bool(tokens.get("access_token")), "artist_id": artist_id}
+def gmail_status(artist_id: str, request: Request = None):
+    """Return only the authenticated artist's Gmail connection state."""
+    try:
+        scoped_artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    tokens = _load_gmail_tokens(scoped_artist_id)
+    return {
+        "connected": bool(tokens.get("access_token")),
+        "artist_id": scoped_artist_id,
+    }
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

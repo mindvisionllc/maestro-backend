@@ -13435,21 +13435,23 @@ class BillingUpgrade(BaseModel):
     tier: str
 
 @app.post("/api/billing/upgrade")
-async def billing_upgrade(payload: BillingUpgrade):
+async def billing_upgrade(payload: BillingUpgrade, request: Request):
+    scoped_artist_id = _require_artist_scope(request, payload.artist_id)
     try:
         if payload.tier not in ("Starter", "Gold", "Platinum", "Diamond"):
             raise HTTPException(status_code=400, detail="Invalid tier")
 
-        existing = load_artist(payload.artist_id)
-        existing["artist_id"] = payload.artist_id
+        existing = load_artist(scoped_artist_id)
+        existing["artist_id"] = scoped_artist_id
         existing["tier"] = payload.tier
-        _save_artist_file(payload.artist_id, existing)
-        print(f"[BILLING] {payload.artist_id} upgraded to {payload.tier}")
+        _save_artist_file(scoped_artist_id, existing)
+        print(f"[BILLING] {scoped_artist_id} upgraded to {payload.tier}")
         return {"status": "ok", "tier": payload.tier}
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
 
 
 # ── Conversation history read ──────────────────────────────────────────────────
@@ -13708,21 +13710,28 @@ def _save_artist_file(path_or_id, data: dict):
 
 
 @app.post("/api/notifications/register")
-async def register_push_token(payload: RegisterTokenRequest):
-    """Save Expo push token to the artist's JSON file."""
+async def register_push_token(payload: RegisterTokenRequest, request: Request):
+    scoped_artist_id = _require_artist_scope(request, payload.artist_id)
     try:
-        path, data = _load_artist_file(payload.artist_id)
+        path, data = _load_artist_file(scoped_artist_id)
+        data["artist_id"] = scoped_artist_id
         data["push_token"] = payload.push_token
         _save_artist_file(path, data)
-        print(f"[PUSH] Registered token for {payload.artist_id}")
+        print(f"[PUSH] Registered token for {scoped_artist_id}")
         return {"status": "ok"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
 
 
 @app.post("/api/notifications/send")
-async def send_notification(payload: SendNotificationRequest):
-    """Send a push notification to an artist via Expo push API and store in history."""
+async def send_notification(
+    payload: SendNotificationRequest,
+    request: Request,
+):
+    """Send a push notification only within the authenticated artist scope."""
+    scoped_artist_id = _require_artist_scope(request, payload.artist_id)
+    payload.artist_id = scoped_artist_id
     try:
         path, data = _load_artist_file(payload.artist_id)
         push_token = data.get("push_token", "")
@@ -13780,13 +13789,14 @@ async def send_notification(payload: SendNotificationRequest):
 
 
 @app.get("/api/notifications/{artist_id}")
-async def get_notifications(artist_id: str):
-    """Return the artist's notification history from their JSON file."""
+async def get_notifications(artist_id: str, request: Request):
+    scoped_artist_id = _require_artist_scope(request, artist_id)
     try:
-        _, data = _load_artist_file(artist_id)
+        _, data = _load_artist_file(scoped_artist_id)
         return {"notifications": data.get("notifications", [])}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
 
 
 # ── Stripe billing ─────────────────────────────────────────────────────────────

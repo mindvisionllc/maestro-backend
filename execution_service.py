@@ -1,3 +1,4 @@
+from fastapi import Request
 """
 Durable execution ledger for the backend's existing single-action providers.
 
@@ -7,6 +8,13 @@ outside this service.
 """
 
 import json
+from artist_identity import (
+    ArtistAuthError,
+    decode_oauth_state,
+    identity_configured,
+    issue_oauth_state,
+    require_artist_scope,
+)
 import logging
 import os
 import sqlite3
@@ -643,47 +651,95 @@ class OperationRequest(BaseModel):
 
 
 @router.post("/api/operations", tags=["operations"])
-def create_operation(req: OperationRequest):
+def create_operation(req: OperationRequest, request: Request = None):
+    try:
+        artist_id = require_artist_scope(request, req.artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
     operation, created = _create_or_get_operation(
-        req.artist_id,
+        artist_id,
         req.action_type,
         req.idempotency_key,
         req.payload,
     )
     return {"operation": operation, "created": created}
+
 
 
 @router.post("/api/operations/execute", tags=["operations"])
-async def create_and_execute_operation(req: OperationRequest):
+async def create_and_execute_operation(req: OperationRequest, request: Request = None):
+    try:
+        artist_id = require_artist_scope(request, req.artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
     operation, created = _create_or_get_operation(
-        req.artist_id,
+        artist_id,
         req.action_type,
         req.idempotency_key,
         req.payload,
     )
-    operation = await execute_operation(operation["id"])
+    operation = await execute_operation(operation["id"], artist_id=artist_id)
     return {"operation": operation, "created": created}
 
 
+
 @router.post("/api/operations/{operation_id}/approve", tags=["operations"])
-def api_approve_operation(operation_id: str, artist_id: str):
-    return approve_operation(operation_id, artist_id=artist_id)
+def api_approve_operation(
+    operation_id: str,
+    artist_id: str,
+    request: Request = None,
+):
+    try:
+        scoped_artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return approve_operation(operation_id, artist_id=scoped_artist_id)
+
 
 
 @router.get("/api/operations/{operation_id}", tags=["operations"])
-def get_operation(operation_id: str, artist_id: str):
+def get_operation(
+    operation_id: str,
+    artist_id: str,
+    request: Request = None,
+):
+    try:
+        scoped_artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
     operation = _get_operation(operation_id)
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
-    _require_operation_owner(operation, artist_id)
+    _require_operation_owner(operation, scoped_artist_id)
     return operation
 
 
+
 @router.post("/api/operations/{operation_id}/execute", tags=["operations"])
-async def api_execute_operation(operation_id: str, artist_id: str):
-    return await execute_operation(operation_id, artist_id=artist_id)
+async def api_execute_operation(
+    operation_id: str,
+    artist_id: str,
+    request: Request = None,
+):
+    try:
+        scoped_artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return await execute_operation(operation_id, artist_id=scoped_artist_id)
+
 
 
 @router.post("/api/operations/{operation_id}/reconcile", tags=["operations"])
-async def api_reconcile_operation(operation_id: str, artist_id: str):
-    return await reconcile_operation(operation_id, artist_id=artist_id)
+async def api_reconcile_operation(
+    operation_id: str,
+    artist_id: str,
+    request: Request = None,
+):
+    try:
+        scoped_artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return await reconcile_operation(operation_id, artist_id=scoped_artist_id)

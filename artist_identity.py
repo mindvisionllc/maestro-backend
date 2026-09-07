@@ -112,3 +112,80 @@ def bearer_token(authorization: str) -> str:
     if separator != " " or scheme.lower() != "bearer" or not token.strip():
         raise ArtistAuthError("Missing artist session")
     return token.strip()
+
+
+def authenticated_artist_id(request) -> str:
+    """Resolve the signed artist principal from an HTTP request."""
+    if not identity_configured():
+        return ""
+    if request is None:
+        raise ArtistAuthError("Missing artist session")
+    token = bearer_token(request.headers.get("Authorization", ""))
+    return decode_session(token)["sub"]
+
+
+def require_artist_scope(request, claimed_artist_id: str) -> str:
+    """Require the signed principal to own the claimed artist scope."""
+    if not identity_configured():
+        return claimed_artist_id
+
+    principal = authenticated_artist_id(request)
+    if (
+        not claimed_artist_id
+        or not hmac.compare_digest(principal, claimed_artist_id)
+    ):
+        raise ArtistAuthError("Artist resource not found")
+    return principal
+
+
+def issue_oauth_state(artist_id: str, provider: str) -> str:
+    """Create a short-lived signed OAuth state bound to artist and provider."""
+    issued_at = int(time.time())
+    payload = {
+        "sub": artist_id,
+        "provider": provider,
+        "iat": issued_at,
+        "exp": issued_at + 600,
+        "ver": 1,
+    }
+    encoded = _b64encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    )
+    signature = _b64encode(
+        hmac.new(
+            _required_secret("PLMKR_SESSION_SECRET"),
+            encoded.encode(),
+            hashlib.sha256,
+        ).digest()
+    )
+    return f"{encoded}.{signature}"
+
+
+def decode_oauth_state(state: str, provider: str) -> str:
+    """Validate signed OAuth state and return its bound artist."""
+    try:
+        encoded, supplied_signature = state.split(".", 1)
+        expected_signature = _b64encode(
+            hmac.new(
+                _required_secret("PLMKR_SESSION_SECRET"),
+                encoded.encode(),
+                hashlib.sha256,
+            ).digest()
+        )
+        if not hmac.compare_digest(supplied_signature, expected_signature):
+            raise ArtistAuthError("Invalid OAuth state")
+
+        payload = json.loads(_b64decode(encoded))
+        if payload.get("ver") != 1:
+            raise ArtistAuthError("Invalid OAuth state")
+        if payload.get("provider") != provider:
+            raise ArtistAuthError("Invalid OAuth provider state")
+        if not isinstance(payload.get("sub"), str) or not payload["sub"]:
+            raise ArtistAuthError("Invalid OAuth state")
+        if not isinstance(payload.get("exp"), int) or payload["exp"] <= int(time.time()):
+            raise ArtistAuthError("OAuth state expired")
+        return payload["sub"]
+    except ArtistAuthError:
+        raise
+    except Exception as exc:
+        raise ArtistAuthError("Invalid OAuth state") from exc
