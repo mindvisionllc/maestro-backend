@@ -5,8 +5,10 @@ import hashlib
 import hmac
 import json
 import os
+import sqlite3
 import time
 import uuid
+from pathlib import Path
 
 
 SESSION_TTL_SECONDS = int(os.environ.get("PLMKR_SESSION_TTL_SECONDS", "2592000"))
@@ -57,6 +59,7 @@ def issue_session(artist_id: str, now: int | None = None) -> dict:
         "sub": artist_id,
         "iat": issued_at,
         "exp": expires_at,
+        "jti": uuid.uuid4().hex,
         "ver": 1,
     }
     encoded = _b64encode(
@@ -97,14 +100,134 @@ def decode_session(token: str, now: int | None = None) -> dict:
             raise ArtistAuthError("Unsupported artist session")
         if not isinstance(payload.get("sub"), str) or not payload["sub"]:
             raise ArtistAuthError("Invalid artist session")
+        if not isinstance(payload.get("jti"), str) or not payload["jti"]:
+            raise ArtistAuthError("Unsupported artist session")
         if not isinstance(payload.get("exp"), int) or payload["exp"] <= current_time:
             raise ArtistAuthError("Artist session expired")
+        if is_session_revoked(payload["jti"], current_time):
+            raise ArtistAuthError("Artist session revoked")
 
         return payload
     except ArtistAuthError:
         raise
     except Exception as exc:
         raise ArtistAuthError("Invalid artist session") from exc
+
+
+def _session_id_hash(session_id: str) -> str:
+    return hashlib.sha256(session_id.encode()).hexdigest()
+
+
+def _sqlite_session_connection():
+    db_path = Path(os.environ.get("DB_PATH", "/data/memory.db"))
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS revoked_artist_sessions ("
+        "session_hash TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, "
+        "revoked_at INTEGER NOT NULL)"
+    )
+    return conn
+
+
+def _postgres_connection():
+    import psycopg2
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    with conn.cursor() as cur:
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS revoked_artist_sessions ("
+            "session_hash TEXT PRIMARY KEY, expires_at BIGINT NOT NULL, "
+            "revoked_at BIGINT NOT NULL)"
+        )
+    conn.commit()
+    return conn
+
+
+def revoke_session(token: str, now: int | None = None) -> None:
+    """Persist revocation of a verified session without storing the raw token."""
+    payload = decode_session(token, now=now)
+    revoked_at = int(time.time() if now is None else now)
+    session_hash = _session_id_hash(payload["jti"])
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    try:
+        if database_url:
+            conn = _postgres_connection()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM revoked_artist_sessions WHERE expires_at <= %s",
+                        (revoked_at,),
+                    )
+                    cur.execute(
+                        "INSERT INTO revoked_artist_sessions "
+                        "(session_hash, expires_at, revoked_at) VALUES (%s, %s, %s) "
+                        "ON CONFLICT (session_hash) DO NOTHING",
+                        (session_hash, payload["exp"], revoked_at),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+        else:
+            conn = _sqlite_session_connection()
+            try:
+                conn.execute(
+                    "DELETE FROM revoked_artist_sessions WHERE expires_at <= ?",
+                    (revoked_at,),
+                )
+                conn.execute(
+                    "INSERT OR IGNORE INTO revoked_artist_sessions "
+                    "(session_hash, expires_at, revoked_at) VALUES (?, ?, ?)",
+                    (session_hash, payload["exp"], revoked_at),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+    except ArtistAuthError:
+        raise
+    except Exception as exc:
+        raise ArtistAuthError("Session revocation unavailable") from exc
+
+
+def is_session_revoked(session_id: str, now: int | None = None) -> bool:
+    """Check durable revocation state, failing closed when storage is unavailable."""
+    current_time = int(time.time() if now is None else now)
+    session_hash = _session_id_hash(session_id)
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    try:
+        if database_url:
+            conn = _postgres_connection()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM revoked_artist_sessions WHERE expires_at <= %s",
+                        (current_time,),
+                    )
+                    cur.execute(
+                        "SELECT 1 FROM revoked_artist_sessions WHERE session_hash = %s",
+                        (session_hash,),
+                    )
+                    revoked = cur.fetchone() is not None
+                conn.commit()
+                return revoked
+            finally:
+                conn.close()
+
+        conn = _sqlite_session_connection()
+        try:
+            conn.execute(
+                "DELETE FROM revoked_artist_sessions WHERE expires_at <= ?",
+                (current_time,),
+            )
+            row = conn.execute(
+                "SELECT 1 FROM revoked_artist_sessions WHERE session_hash = ?",
+                (session_hash,),
+            ).fetchone()
+            conn.commit()
+            return row is not None
+        finally:
+            conn.close()
+    except Exception as exc:
+        raise ArtistAuthError("Session validation unavailable") from exc
 
 
 def bearer_token(authorization: str) -> str:

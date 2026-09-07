@@ -1,4 +1,7 @@
 import importlib
+import sqlite3
+import sys
+import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -97,6 +100,94 @@ def test_bearer_session_satisfies_customer_middleware_without_api_key(identity_c
         headers={"Authorization": f"Bearer {artist['access_token']}"},
     )
     assert response.status_code == 200, response.text
+
+
+def test_logout_persistently_revokes_current_session(identity_client, tmp_path):
+    artist = login(identity_client, "+1 555 102 8888")
+    bearer_headers = {
+        "Authorization": f"Bearer {artist['access_token']}",
+    }
+
+    before = identity_client.get(
+        f"/api/artist?artist_id={artist['artist_id']}",
+        headers=bearer_headers,
+    )
+    assert before.status_code == 200, before.text
+
+    logout = identity_client.post("/api/auth/logout", headers=bearer_headers)
+    assert logout.status_code == 200, logout.text
+    assert logout.json()["revoked"] is True
+
+    after = identity_client.get(
+        f"/api/artist?artist_id={artist['artist_id']}",
+        headers=bearer_headers,
+    )
+    assert after.status_code == 401, after.text
+
+    with sqlite3.connect(str(tmp_path / "identity.db")) as conn:
+        rows = conn.execute(
+            "SELECT session_hash FROM revoked_artist_sessions"
+        ).fetchall()
+    assert len(rows) == 1
+    assert artist["access_token"] not in rows[0][0]
+
+
+def test_postgres_revocation_path_uses_hashed_session_ids(monkeypatch):
+    from artist_identity import ArtistAuthError, decode_session, issue_session, revoke_session
+
+    revoked_hashes = set()
+    executed = []
+
+    class FakeCursor:
+        def __init__(self):
+            self.selected = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def execute(self, sql, params=()):
+            normalized = " ".join(sql.split())
+            executed.append((normalized, params))
+            if normalized.startswith("INSERT INTO revoked_artist_sessions"):
+                revoked_hashes.add(params[0])
+            elif normalized.startswith("SELECT 1 FROM revoked_artist_sessions"):
+                self.selected = params[0] in revoked_hashes
+
+        def fetchone(self):
+            return (1,) if self.selected else None
+
+    class FakeConnection:
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setenv("PLMKR_SESSION_SECRET", SESSION_SECRET)
+    monkeypatch.setenv("PLMKR_IDENTITY_SECRET", IDENTITY_SECRET)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://test/session-db")
+    monkeypatch.setitem(
+        sys.modules,
+        "psycopg2",
+        types.SimpleNamespace(connect=lambda _: FakeConnection()),
+    )
+
+    session = issue_session("artist_postgres", now=1_000)
+    assert decode_session(session["access_token"], now=1_001)["sub"] == "artist_postgres"
+    revoke_session(session["access_token"], now=1_002)
+
+    with pytest.raises(ArtistAuthError, match="revoked"):
+        decode_session(session["access_token"], now=1_003)
+
+    assert len(revoked_hashes) == 1
+    assert session["access_token"] not in next(iter(revoked_hashes))
+    assert any("ON CONFLICT (session_hash) DO NOTHING" in sql for sql, _ in executed)
 
 
 def test_otp_attempt_limit_invalidates_code(identity_client, monkeypatch):

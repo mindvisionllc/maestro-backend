@@ -1165,6 +1165,12 @@ Clients send the session as:
 
 `Authorization: Bearer <access_token>`
 
+`POST /api/auth/logout` durably revokes the presented session before the client
+clears its local credentials. Revocation records contain only a SHA-256 hash of
+the session identifier and expire with the session. SQLite is used for local
+operation and PostgreSQL when `DATABASE_URL` is configured. A revoked session
+is rejected with HTTP 401 on subsequent requests.
+
 The shared `X-API-Key` remains a separate application-level boundary for
 administrative and service access; it is not embedded in mobile clients and is
 not an artist identity. OTP bootstrap routes do not require it. A valid artist

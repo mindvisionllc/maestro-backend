@@ -25,6 +25,7 @@ from artist_identity import (
     issue_session,
     new_artist_id,
     phone_fingerprint,
+    revoke_session,
 )
 setup_logging()
 log = get_logger("main")
@@ -13745,6 +13746,18 @@ async def verify_otp(payload: VerifyOtpRequest):
         },
         **session,
     }
+
+
+@app.post("/api/auth/logout")
+async def logout_artist_session(request: Request):
+    """Revoke the current artist session before the client clears local state."""
+    try:
+        token = bearer_token(request.headers.get("Authorization", ""))
+        payload = decode_session(token)
+        revoke_session(token)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+    return {"status": "ok", "artist_id": payload["sub"], "revoked": True}
 
 
 
