@@ -1176,3 +1176,11 @@ OTP requests are throttled per normalized phone number with a resend cooldown
 and rolling send window. Repeated incorrect verification attempts invalidate
 the current code and require a new OTP. Release and campaign routes enforce the
 same signed artist ownership boundary as other artist resources.
+
+Artist bearer sessions do not grant administrative access. Diagnostic endpoints
+under `/api/admin/diagnostics` require the server-side `X-API-Key`, while
+`/api/admin/stats` is artist-facing and restricted to the signed artist. Booking,
+PR, and curator directories are shared read-only catalogs; creating, editing, or
+seeding catalog records requires administrative authorization. Device
+registration, device listing, and push delivery are restricted to the signed
+artist that owns the device records.

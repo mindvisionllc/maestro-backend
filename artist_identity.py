@@ -138,6 +138,20 @@ def require_artist_scope(request, claimed_artist_id: str) -> str:
     return principal
 
 
+def require_admin_api_key(request) -> None:
+    """Require the server-side API key; artist bearer sessions are not admin auth."""
+    configured_key = os.environ.get("PLMKR_API_KEY", "").strip()
+    if not configured_key:
+        if identity_configured():
+            raise ArtistAuthError("Admin API key is not configured")
+        return
+    if request is None:
+        raise ArtistAuthError("Missing admin authorization")
+    supplied_key = request.headers.get("X-API-Key", "")
+    if not hmac.compare_digest(supplied_key, configured_key):
+        raise ArtistAuthError("Invalid admin authorization")
+
+
 def issue_oauth_state(artist_id: str, provider: str) -> str:
     """Create a short-lived signed OAuth state bound to artist and provider."""
     issued_at = int(time.time())

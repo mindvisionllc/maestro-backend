@@ -15,8 +15,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
+
+from artist_identity import ArtistAuthError, require_admin_api_key, require_artist_scope
 
 from logging_config import get_ring_buffer
 
@@ -30,6 +32,13 @@ _STATIC_DIR  = Path(__file__).parent / "static"
 
 def _conn():
     return sqlite3.connect(str(_DB_PATH))
+
+
+def _require_admin(request: Request) -> None:
+    try:
+        require_admin_api_key(request)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -54,13 +63,15 @@ def _max_date(cur, table: str, col: str, where: str, params: tuple) -> Optional[
 # ── Stats endpoint ────────────────────────────────────────────────────────────
 
 @router.get("/api/admin/stats", tags=["admin"])
-def admin_stats(artist_id: str, since: Optional[str] = None):
+def admin_stats(artist_id: str, request: Request, since: Optional[str] = None):
     """
     Return activity stats for an artist.
     since: ISO datetime string (optional). If omitted, returns all-time stats.
     """
-    if not artist_id:
-        raise HTTPException(status_code=400, detail="artist_id is required")
+    try:
+        artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
     since_val = since or "1970-01-01T00:00:00"
 
@@ -297,8 +308,9 @@ def _scheduler_info() -> dict:
 
 
 @router.get("/api/admin/diagnostics/anthropic-stats", tags=["admin"])
-def admin_anthropic_stats():
+def admin_anthropic_stats(request: Request):
     """Per-model Anthropic call counters (total, success, retry, fail). Auth required."""
+    _require_admin(request)
     from anthropic_utils import get_anthropic_stats
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -307,8 +319,9 @@ def admin_anthropic_stats():
 
 
 @router.get("/api/admin/diagnostics/gmail-stats", tags=["admin"])
-def admin_gmail_stats():
+def admin_gmail_stats(request: Request):
     """Per-artist Gmail call counters (total, success, retry, fail). Auth required."""
+    _require_admin(request)
     from pitch_service import get_gmail_stats
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -317,11 +330,12 @@ def admin_gmail_stats():
 
 
 @router.get("/api/admin/diagnostics/performance", tags=["admin"])
-def admin_diagnostics_performance():
+def admin_diagnostics_performance(request: Request):
     """
     Per-route p50/p95/p99 latency percentiles. Auth required.
     Rolling window of last 1000 requests per route.
     """
+    _require_admin(request)
     from performance_metrics import get_all_percentiles
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -379,8 +393,9 @@ def _scheduler_queue_diagnostics() -> dict:
 
 
 @router.get("/api/admin/diagnostics/scheduler", tags=["admin"])
-def admin_diagnostics_scheduler():
+def admin_diagnostics_scheduler(request: Request):
     """Scheduler queue state: next 10 pending, last 20 completed, 24h status counts. Auth required."""
+    _require_admin(request)
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         **_scheduler_queue_diagnostics(),
@@ -388,10 +403,11 @@ def admin_diagnostics_scheduler():
 
 
 @router.get("/api/admin/diagnostics", tags=["admin"])
-def admin_diagnostics():
+def admin_diagnostics(request: Request):
     """
     Full runtime diagnostics. Requires X-API-Key. Never exposes env var values.
     """
+    _require_admin(request)
     rb = get_ring_buffer()
     recent_errors = rb.get_entries()[-20:] if rb else []
     return {

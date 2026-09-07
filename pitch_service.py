@@ -14,6 +14,7 @@ from artist_identity import (
     decode_oauth_state,
     identity_configured,
     issue_oauth_state,
+    require_admin_api_key,
     require_artist_scope,
 )
 import re
@@ -32,7 +33,7 @@ from typing import Optional
 
 from prompt_safety import sanitize_for_prompt  # R-23
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 import anthropic
@@ -699,7 +700,11 @@ def get_curator(curator_id: str):
 
 
 @router.post("/api/curators", status_code=201, tags=["curators"])
-def create_curator(c: CuratorIn):
+def create_curator(c: CuratorIn, request: Request):
+    try:
+        require_admin_api_key(request)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
     new_id = str(uuid.uuid4())
     row    = {**c.model_dump(), "id": new_id}
     _db_upsert_curator(row)
@@ -707,7 +712,11 @@ def create_curator(c: CuratorIn):
 
 
 @router.patch("/api/curators/{curator_id}", tags=["curators"])
-def patch_curator(curator_id: str, patch: CuratorPatch):
+def patch_curator(curator_id: str, patch: CuratorPatch, request: Request):
+    try:
+        require_admin_api_key(request)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
     existing = _db_get_curator(curator_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Curator not found")
@@ -763,7 +772,11 @@ def patch_pitch(pitch_id: str, patch: PitchPatch, request: Request = None):
 # ── Seed endpoint (admin, one-time) ──────────────────────────────────────────
 
 @router.post("/api/curators/seed", tags=["curators"])
-def seed_curators_endpoint():
+def seed_curators_endpoint(request: Request):
+    try:
+        require_admin_api_key(request)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
     """Load curators from data/curators_seed.json. Idempotent."""
     seed_path = Path(__file__).parent / "data" / "curators_seed.json"
     if not seed_path.exists():

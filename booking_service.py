@@ -9,7 +9,7 @@ Tables always live in SQLite. Gmail send reuses pitch_service.send_email().
 """
 
 import os
-from artist_identity import ArtistAuthError, require_artist_scope
+from artist_identity import ArtistAuthError, require_admin_api_key, require_artist_scope
 import re
 import json
 import uuid
@@ -357,7 +357,11 @@ def get_booking_contact(contact_id: str):
 
 
 @router.post("/api/booking-contacts", status_code=201, tags=["booking"])
-def create_booking_contact(c: BookingContactIn):
+def create_booking_contact(c: BookingContactIn, request: Request):
+    try:
+        require_admin_api_key(request)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
     new_id = str(uuid.uuid4())
     row    = {**c.model_dump(), "id": new_id}
     _db_upsert_booking_contact(row)
@@ -365,7 +369,11 @@ def create_booking_contact(c: BookingContactIn):
 
 
 @router.patch("/api/booking-contacts/{contact_id}", tags=["booking"])
-def patch_booking_contact(contact_id: str, patch: BookingContactPatch):
+def patch_booking_contact(contact_id: str, patch: BookingContactPatch, request: Request):
+    try:
+        require_admin_api_key(request)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
     existing = _db_get_booking_contact(contact_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Booking contact not found")
@@ -423,7 +431,11 @@ def patch_booking_inquiry(inquiry_id: str, patch: BookingInquiryPatch, request: 
 # ── Seed endpoint ─────────────────────────────────────────────────────────────
 
 @router.post("/api/booking-contacts/seed", tags=["booking"])
-def seed_booking_contacts_endpoint():
+def seed_booking_contacts_endpoint(request: Request):
+    try:
+        require_admin_api_key(request)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
     seed_path = Path(__file__).parent / "data" / "booking_contacts_seed.json"
     if not seed_path.exists():
         raise HTTPException(status_code=404, detail="data/booking_contacts_seed.json not found")

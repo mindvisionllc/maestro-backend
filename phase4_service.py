@@ -19,8 +19,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+
+from artist_identity import ArtistAuthError, require_artist_scope
 
 log = logging.getLogger("phase4_service")
 
@@ -156,8 +158,12 @@ class DeviceRegisterRequest(BaseModel):
 
 
 @router.post("/api/devices/register", status_code=201, tags=["phase4"])
-def register_device(req: DeviceRegisterRequest):
+def register_device(req: DeviceRegisterRequest, request: Request = None):
     """Register an iOS or Android device token for push notifications."""
+    try:
+        req.artist_id = require_artist_scope(request, req.artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     platform = req.platform.lower()
     if platform not in ("ios", "android"):
         raise HTTPException(status_code=400, detail="platform must be 'ios' or 'android'")
@@ -172,8 +178,12 @@ def register_device(req: DeviceRegisterRequest):
 
 
 @router.get("/api/devices", tags=["phase4"])
-def list_devices(artist_id: str):
+def list_devices(artist_id: str, request: Request = None):
     """List registered device tokens for an artist."""
+    try:
+        artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     return {"devices": _db_list_device_tokens(artist_id)}
 
 
@@ -185,11 +195,15 @@ class NotificationSendRequest(BaseModel):
 
 
 @router.post("/api/push/send", tags=["phase4"])
-async def push_send(req: NotificationSendRequest):
+async def push_send(req: NotificationSendRequest, request: Request = None):
     """
     Send push notification to all registered devices for an artist.
     APNs and FCM clients are stubs behind APNS_LIVE / FCM_LIVE flags (default false).
     """
+    try:
+        req.artist_id = require_artist_scope(request, req.artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     devices = _db_list_device_tokens(req.artist_id)
     if not devices:
         return {"sent": 0, "errors": [], "note": "no registered devices"}

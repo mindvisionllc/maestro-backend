@@ -39,6 +39,8 @@ def identity_client(monkeypatch, tmp_path):
         "social_service",
         "execution_service",
         "release_service",
+        "phase4_service",
+        "admin_service",
     ):
         module = sys.modules.get(module_name)
         if module is not None and hasattr(module, "_DB_PATH"):
@@ -413,6 +415,83 @@ def test_cross_artist_release_and_campaign_resources_are_denied(identity_client)
             **kwargs,
         )
         assert response.status_code == 404, (method, path, response.text)
+
+
+def test_phase4_devices_and_artist_stats_are_owner_scoped(identity_client):
+    artist_a = login(identity_client, "+1 555 902 0001")
+    artist_b = login(identity_client, "+1 555 902 0002")
+
+    registered = identity_client.post(
+        "/api/devices/register",
+        json={
+            "artist_id": artist_b["artist_id"],
+            "platform": "ios",
+            "token": "ExponentPushToken[artist-b-device]",
+            "app_version": "1.0.0",
+        },
+        headers=headers(artist_b),
+    )
+    assert registered.status_code == 201, registered.text
+
+    cases = (
+        ("get", f"/api/devices?artist_id={artist_b['artist_id']}", {}),
+        (
+            "post",
+            "/api/devices/register",
+            {"json": {
+                "artist_id": artist_b["artist_id"],
+                "platform": "ios",
+                "token": "ExponentPushToken[cross-artist-device]",
+                "app_version": "1.0.0",
+            }},
+        ),
+        (
+            "post",
+            "/api/push/send",
+            {"json": {
+                "artist_id": artist_b["artist_id"],
+                "title": "Blocked",
+                "body": "Must not cross artist scope",
+            }},
+        ),
+        ("get", f"/api/admin/stats?artist_id={artist_b['artist_id']}", {}),
+    )
+    for method, path, kwargs in cases:
+        response = getattr(identity_client, method)(
+            path,
+            headers=headers(artist_a),
+            **kwargs,
+        )
+        assert response.status_code == 404, (method, path, response.text)
+
+
+def test_artist_session_cannot_use_admin_or_shared_directory_mutations(identity_client):
+    artist = login(identity_client, "+1 555 903 0001")
+    # Use only the customer bearer session. The shared test helper also adds
+    # the valid administrator API key, which would correctly authorize admin
+    # operations and therefore cannot be used for this negative test.
+    artist_headers = {
+        "Authorization": f"Bearer {artist['access_token']}",
+    }
+
+    for method, path in (
+        ("get", "/api/admin/diagnostics"),
+        ("get", "/api/admin/diagnostics/anthropic-stats"),
+        ("get", "/api/admin/diagnostics/gmail-stats"),
+        ("get", "/api/admin/diagnostics/performance"),
+        ("get", "/api/admin/diagnostics/scheduler"),
+        ("post", "/api/curators/seed"),
+        ("post", "/api/pr-contacts/seed"),
+        ("post", "/api/booking-contacts/seed"),
+    ):
+        response = getattr(identity_client, method)(path, headers=artist_headers)
+        assert response.status_code == 401, (method, path, response.text)
+
+    admin_response = identity_client.get(
+        "/api/admin/diagnostics",
+        headers={"X-API-Key": API_KEY},
+    )
+    assert admin_response.status_code == 200, admin_response.text
 
 
 def test_signed_oauth_state_is_artist_and_provider_bound(identity_client):

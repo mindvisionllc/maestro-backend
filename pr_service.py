@@ -8,7 +8,7 @@ Tables always live in SQLite. Gmail send reuses pitch_service.send_email().
 """
 
 import os
-from artist_identity import ArtistAuthError, require_artist_scope
+from artist_identity import ArtistAuthError, require_admin_api_key, require_artist_scope
 import re
 import json
 import uuid
@@ -338,7 +338,11 @@ def get_pr_contact(contact_id: str):
 
 
 @router.post("/api/pr-contacts", status_code=201, tags=["pr"])
-def create_pr_contact(c: PRContactIn):
+def create_pr_contact(c: PRContactIn, request: Request):
+    try:
+        require_admin_api_key(request)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
     new_id = str(uuid.uuid4())
     row    = {**c.model_dump(), "id": new_id}
     _db_upsert_pr_contact(row)
@@ -346,7 +350,11 @@ def create_pr_contact(c: PRContactIn):
 
 
 @router.patch("/api/pr-contacts/{contact_id}", tags=["pr"])
-def patch_pr_contact(contact_id: str, patch: PRContactPatch):
+def patch_pr_contact(contact_id: str, patch: PRContactPatch, request: Request):
+    try:
+        require_admin_api_key(request)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
     existing = _db_get_pr_contact(contact_id)
     if not existing:
         raise HTTPException(status_code=404, detail="PR contact not found")
@@ -403,7 +411,11 @@ def patch_pr_outreach(outreach_id: str, patch: PROutreachPatch, request: Request
 # ── Seed endpoint ─────────────────────────────────────────────────────────────
 
 @router.post("/api/pr-contacts/seed", tags=["pr"])
-def seed_pr_contacts_endpoint():
+def seed_pr_contacts_endpoint(request: Request):
+    try:
+        require_admin_api_key(request)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
     seed_path = Path(__file__).parent / "data" / "pr_contacts_seed.json"
     if not seed_path.exists():
         raise HTTPException(status_code=404, detail="data/pr_contacts_seed.json not found")
