@@ -9,6 +9,7 @@ Tables always live in SQLite. Gmail send reuses pitch_service.send_email().
 """
 
 import os
+from artist_identity import ArtistAuthError, require_artist_scope
 import re
 import json
 import uuid
@@ -24,7 +25,7 @@ from prompt_safety import sanitize_for_prompt  # R-23
 
 log = logging.getLogger("booking_service")
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 import anthropic
 from anthropic_utils import _anthropic_call_with_retry
@@ -383,24 +384,36 @@ class BookingInquiryPatch(BaseModel):
 
 
 @router.get("/api/booking-inquiries", tags=["booking"])
-def list_booking_inquiries(artist_id: str):
+def list_booking_inquiries(artist_id: str, request: Request = None):
+    try:
+        artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     return {"booking_inquiries": _db_list_booking_inquiries(artist_id)}
 
 
 @router.get("/api/booking-inquiries/{inquiry_id}", tags=["booking"])
-def get_booking_inquiry(inquiry_id: str):
+def get_booking_inquiry(inquiry_id: str, request: Request = None):
     o = _db_get_booking_inquiry(inquiry_id)
     if not o:
         raise HTTPException(status_code=404, detail="Booking inquiry not found")
+    try:
+        require_artist_scope(request, o["artist_id"])
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     o["interactions"] = _db_list_booking_interactions(inquiry_id)
     return o
 
 
 @router.patch("/api/booking-inquiries/{inquiry_id}", tags=["booking"])
-def patch_booking_inquiry(inquiry_id: str, patch: BookingInquiryPatch):
+def patch_booking_inquiry(inquiry_id: str, patch: BookingInquiryPatch, request: Request = None):
     o = _db_get_booking_inquiry(inquiry_id)
     if not o:
         raise HTTPException(status_code=404, detail="Booking inquiry not found")
+    try:
+        require_artist_scope(request, o["artist_id"])
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     updates = {k: v for k, v in patch.model_dump().items() if v is not None}
     if updates:
         _db_update_booking_inquiry(inquiry_id, updates)
@@ -502,8 +515,12 @@ class GenerateBookingRequest(BaseModel):
 
 
 @router.post("/api/booking-inquiries/generate", tags=["booking"])
-async def api_generate_booking(req: GenerateBookingRequest):
-    artist  = _load_artist_data(req.artist_id)
+async def api_generate_booking(req: GenerateBookingRequest, request: Request = None):
+    try:
+        artist_id = require_artist_scope(request, req.artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    artist  = _load_artist_data(artist_id)
     contact = _db_get_booking_contact(req.contact_id)
     if not contact:
         raise HTTPException(status_code=404, detail="Booking contact not found")
@@ -511,7 +528,7 @@ async def api_generate_booking(req: GenerateBookingRequest):
         draft = await generate_booking_email(artist, req.show_context, contact)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Booking email generation failed: {e}")
-    return {**draft, "artist_id": req.artist_id, "contact_id": req.contact_id}
+    return {**draft, "artist_id": artist_id, "contact_id": req.contact_id}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -525,8 +542,12 @@ class BatchBookingRequest(BaseModel):
 
 
 @router.post("/api/booking-inquiries/batch", tags=["booking"])
-async def send_booking_emails(req: BatchBookingRequest):
+async def send_booking_emails(req: BatchBookingRequest, request: Request = None):
     """Legacy booking batch send is disabled because it bypasses durable approval."""
+    try:
+        require_artist_scope(request, req.artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     raise HTTPException(
         status_code=409,
         detail={
@@ -764,8 +785,12 @@ async def detect_booking_replies(artist_id: str, gmail_service=None) -> dict:
 
 
 @router.post("/api/booking-inquiries/scan", tags=["booking"])
-async def api_scan_booking_inbox(artist_id: str):
+async def api_scan_booking_inbox(artist_id: str, request: Request = None):
     """Manually trigger booking inbox scan for one artist."""
+    try:
+        artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     try:
         from pitch_service import _get_gmail_service, GmailNotConnected, GmailAuthExpired
         service = _get_gmail_service(artist_id)
@@ -782,7 +807,7 @@ async def api_scan_booking_inbox(artist_id: str):
 # ── Unified scan-all endpoint ─────────────────────────────────────────────────
 
 @router.post("/api/inbox/scan-all", tags=["booking"])
-async def api_scan_all_inbox(artist_id: str):
+async def api_scan_all_inbox(artist_id: str, request: Request = None):
     """
     Single Gmail auth, then run pitch + PR + booking reply detection in sequence.
     One Gmail API authentication round-trip per call instead of three.
@@ -793,6 +818,10 @@ async def api_scan_all_inbox(artist_id: str):
     )
     from pr_service import detect_pr_replies
 
+    try:
+        artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     try:
         service = _get_gmail_service(artist_id)
     except Exception as e:
@@ -895,11 +924,25 @@ async def _generate_booking_followup(original: dict, contact: dict, artist: dict
 
 
 @router.post("/api/booking-inquiries/followups/queue", tags=["booking"])
-async def queue_booking_followups(artist_id: str = ""):
+async def queue_booking_followups(artist_id: str = "", request: Request = None):
     """
     Find sent booking inquiries on day 5 or 14, generate follow-ups, send them.
     Returns {"queued": N, "sent": M, "failed": K, "details": [...]}.
     """
+    try:
+        require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "durable_operation_required",
+            "action_type": "gmail.send",
+            "message": "Booking follow-up sending is disabled. Create and approve durable Gmail operations instead.",
+        },
+    )
+
+    # Unreachable legacy implementation retained temporarily for bounded migration.
     from pitch_service import send_email, GmailNotConnected, GmailAuthExpired
 
     inquiries = _get_booking_inquiries_needing_followup(artist_id)

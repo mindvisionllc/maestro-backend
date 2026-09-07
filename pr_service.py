@@ -8,6 +8,7 @@ Tables always live in SQLite. Gmail send reuses pitch_service.send_email().
 """
 
 import os
+from artist_identity import ArtistAuthError, require_artist_scope
 import re
 import json
 import uuid
@@ -21,7 +22,7 @@ from typing import Optional
 
 from prompt_safety import sanitize_for_prompt  # R-23
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 log = logging.getLogger("pr_service")
 from pydantic import BaseModel
@@ -363,24 +364,36 @@ class PROutreachPatch(BaseModel):
 
 
 @router.get("/api/pr-outreach", tags=["pr"])
-def list_pr_outreach(artist_id: str):
+def list_pr_outreach(artist_id: str, request: Request = None):
+    try:
+        artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     return {"pr_outreach": _db_list_pr_outreach(artist_id)}
 
 
 @router.get("/api/pr-outreach/{outreach_id}", tags=["pr"])
-def get_pr_outreach(outreach_id: str):
+def get_pr_outreach(outreach_id: str, request: Request = None):
     o = _db_get_pr_outreach(outreach_id)
     if not o:
         raise HTTPException(status_code=404, detail="PR outreach not found")
+    try:
+        require_artist_scope(request, o["artist_id"])
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     o["interactions"] = _db_list_pr_interactions(outreach_id)
     return o
 
 
 @router.patch("/api/pr-outreach/{outreach_id}", tags=["pr"])
-def patch_pr_outreach(outreach_id: str, patch: PROutreachPatch):
+def patch_pr_outreach(outreach_id: str, patch: PROutreachPatch, request: Request = None):
     o = _db_get_pr_outreach(outreach_id)
     if not o:
         raise HTTPException(status_code=404, detail="PR outreach not found")
+    try:
+        require_artist_scope(request, o["artist_id"])
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     updates = {k: v for k, v in patch.model_dump().items() if v is not None}
     if updates:
         _db_update_pr_outreach(outreach_id, updates)
@@ -480,8 +493,12 @@ class GeneratePRRequest(BaseModel):
 
 
 @router.post("/api/pr-outreach/generate", tags=["pr"])
-async def api_generate_pr(req: GeneratePRRequest):
-    artist  = _load_artist_data(req.artist_id)
+async def api_generate_pr(req: GeneratePRRequest, request: Request = None):
+    try:
+        artist_id = require_artist_scope(request, req.artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    artist  = _load_artist_data(artist_id)
     contact = _db_get_pr_contact(req.contact_id)
     if not contact:
         raise HTTPException(status_code=404, detail="PR contact not found")
@@ -489,7 +506,7 @@ async def api_generate_pr(req: GeneratePRRequest):
         draft = await generate_pr_email(artist, req.release_context, contact)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PR email generation failed: {e}")
-    return {**draft, "artist_id": req.artist_id, "contact_id": req.contact_id}
+    return {**draft, "artist_id": artist_id, "contact_id": req.contact_id}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -503,8 +520,12 @@ class BatchPRRequest(BaseModel):
 
 
 @router.post("/api/pr-outreach/batch", tags=["pr"])
-async def send_pr_emails(req: BatchPRRequest):
+async def send_pr_emails(req: BatchPRRequest, request: Request = None):
     """Legacy PR batch send is disabled because it bypasses durable approval."""
+    try:
+        require_artist_scope(request, req.artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     raise HTTPException(
         status_code=409,
         detail={
@@ -743,8 +764,12 @@ async def detect_pr_replies(artist_id: str, gmail_service=None) -> dict:
 
 
 @router.post("/api/pr-outreach/scan", tags=["pr"])
-async def api_scan_pr_inbox(artist_id: str):
+async def api_scan_pr_inbox(artist_id: str, request: Request = None):
     """Manually trigger PR inbox scan for one artist."""
+    try:
+        artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     try:
         from pitch_service import _get_gmail_service, GmailNotConnected, GmailAuthExpired
         service = _get_gmail_service(artist_id)
@@ -831,11 +856,25 @@ async def _generate_pr_followup(original: dict, contact: dict, artist: dict) -> 
 
 
 @router.post("/api/pr-outreach/followups/queue", tags=["pr"])
-async def queue_pr_followups(artist_id: str = ""):
+async def queue_pr_followups(artist_id: str = "", request: Request = None):
     """
     Find sent PR outreach on day 3 or 7, generate follow-ups, send them.
     Returns {"queued": N, "sent": M, "failed": K, "details": [...]}.
     """
+    try:
+        require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "durable_operation_required",
+            "action_type": "gmail.send",
+            "message": "PR follow-up sending is disabled. Create and approve durable Gmail operations instead.",
+        },
+    )
+
+    # Unreachable legacy implementation retained temporarily for bounded migration.
     from pitch_service import send_email, GmailNotConnected, GmailAuthExpired
 
     outreaches = _get_pr_outreach_needing_followup(artist_id)

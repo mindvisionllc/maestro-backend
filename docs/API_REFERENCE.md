@@ -1155,11 +1155,19 @@ successful `POST /api/auth/verify-otp` responses include a server-owned
 Phone numbers are bound to artist accounts using an HMAC fingerprint. Raw phone
 numbers are not embedded in artist IDs. Authenticated artist profile, history,
 and name-lookup routes reject cross-artist access with HTTP 404 and reject
-missing, invalid, or expired artist sessions with HTTP 401.
+missing, invalid, or expired artist sessions with HTTP 401. The same ownership
+boundary covers chat and handoff context, billing and notifications, Gmail and
+Buffer connections, durable operations, pitches, PR outreach, booking
+inquiries, social posts, and weekly reports—including routes addressed only by
+a resource ID.
 
 Clients send the session as:
 
 `Authorization: Bearer <access_token>`
 
-The shared `X-API-Key` remains a separate application-level boundary during the
-migration and is not an artist identity.
+The shared `X-API-Key` remains a separate application-level boundary for
+administrative and service access; it is not embedded in mobile clients and is
+not an artist identity. OTP bootstrap routes do not require it. A valid artist
+Bearer session satisfies middleware for customer API requests. Gmail and Buffer
+callbacks rely on signed OAuth state, while the Stripe webhook relies on its
+provider signature.

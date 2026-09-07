@@ -724,24 +724,36 @@ class PitchPatch(BaseModel):
 
 
 @router.get("/api/pitches", tags=["pitches"])
-def list_pitches(artist_id: str):
+def list_pitches(artist_id: str, request: Request = None):
+    try:
+        artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     return {"pitches": _db_list_pitches(artist_id)}
 
 
 @router.get("/api/pitches/{pitch_id}", tags=["pitches"])
-def get_pitch(pitch_id: str):
+def get_pitch(pitch_id: str, request: Request = None):
     p = _db_get_pitch(pitch_id)
     if not p:
         raise HTTPException(status_code=404, detail="Pitch not found")
+    try:
+        require_artist_scope(request, p["artist_id"])
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     p["interactions"] = _db_list_interactions(pitch_id)
     return p
 
 
 @router.patch("/api/pitches/{pitch_id}", tags=["pitches"])
-def patch_pitch(pitch_id: str, patch: PitchPatch):
+def patch_pitch(pitch_id: str, patch: PitchPatch, request: Request = None):
     p = _db_get_pitch(pitch_id)
     if not p:
         raise HTTPException(status_code=404, detail="Pitch not found")
+    try:
+        require_artist_scope(request, p["artist_id"])
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     updates = {k: v for k, v in patch.model_dump().items() if v is not None}
     if updates:
         _db_update_pitch(pitch_id, updates)
@@ -847,9 +859,13 @@ class GeneratePitchRequest(BaseModel):
 
 
 @router.post("/api/pitches/generate", tags=["pitches"])
-async def api_generate_pitch(req: GeneratePitchRequest):
+async def api_generate_pitch(req: GeneratePitchRequest, request: Request = None):
     """Generate (but do not send) a pitch draft for one curator."""
-    artist  = _load_artist_data(req.artist_id)
+    try:
+        artist_id = require_artist_scope(request, req.artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    artist  = _load_artist_data(artist_id)
     curator = _db_get_curator(req.curator_id)
     if not curator:
         raise HTTPException(status_code=404, detail="Curator not found")
@@ -857,7 +873,7 @@ async def api_generate_pitch(req: GeneratePitchRequest):
         draft = await generate_pitch_email(artist, req.track_metadata, curator)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Pitch generation failed: {e}")
-    return {**draft, "artist_id": req.artist_id, "curator_id": req.curator_id}
+    return {**draft, "artist_id": artist_id, "curator_id": req.curator_id}
 
 
 # ── Daily send quota ──────────────────────────────────────────────────────────
@@ -908,12 +924,16 @@ class BatchPitchRequest(BaseModel):
 
 
 @router.post("/api/pitches/batch", tags=["pitches"])
-async def send_pitch_emails(req: BatchPitchRequest):
+async def send_pitch_emails(req: BatchPitchRequest, request: Request = None):
     """Legacy batch send is disabled because it bypasses durable approval.
 
     Generate drafts with /api/pitches/generate, then create one gmail.send
     operation per approved recipient through /api/operations.
     """
+    try:
+        require_artist_scope(request, req.artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     raise HTTPException(
         status_code=409,
         detail={
@@ -1186,8 +1206,12 @@ async def detect_replies(artist_id: str) -> dict:
 
 
 @router.post("/api/inbox/scan", tags=["pitches"])
-async def api_scan_inbox(artist_id: str):
+async def api_scan_inbox(artist_id: str, request: Request = None):
     """Manually trigger inbox scan for one artist."""
+    try:
+        artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     try:
         return await detect_replies(artist_id)
     except GmailNotConnected:
@@ -1329,12 +1353,26 @@ async def _generate_followup(original: dict, curator: dict, artist: dict) -> dic
 
 
 @router.post("/api/pitches/followups/queue", tags=["pitches"])
-async def queue_followups(artist_id: str = ""):
+async def queue_followups(artist_id: str = "", request: Request = None):
     """
     Find sent pitches that hit a follow-up threshold today,
     generate follow-up emails, and send them.
     Returns {"queued": N, "sent": M, "failed": K, "details": [...]}.
     """
+    try:
+        require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "durable_operation_required",
+            "action_type": "gmail.send",
+            "message": "Pitch follow-up sending is disabled. Create and approve durable Gmail operations instead.",
+        },
+    )
+
+    # Unreachable legacy implementation retained temporarily for bounded migration.
     pitches = _get_pitches_needing_followup(artist_id)
     results: dict = {"queued": 0, "sent": 0, "failed": 0, "details": []}
 

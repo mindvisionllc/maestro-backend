@@ -1048,6 +1048,12 @@ class _TimingMiddleware(BaseHTTPMiddleware):
 
 _SKIP_AUTH_PATHS = {"/health", "/api/admin/health/deep", "/docs", "/redoc", "/openapi.json",
                     "/admin/dashboard"}
+_ARTIST_AUTH_BOOTSTRAP_PATHS = {"/api/auth/send-otp", "/api/auth/verify-otp"}
+_SIGNED_PROVIDER_CALLBACK_PATHS = {
+    "/api/gmail/callback",
+    "/api/buffer/callback",
+    "/api/billing/webhook",
+}
 
 class _APIKeyMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -1057,13 +1063,24 @@ class _APIKeyMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         if request.url.path in _SKIP_AUTH_PATHS:
             return await call_next(request)
+        if request.url.path in _ARTIST_AUTH_BOOTSTRAP_PATHS:
+            return await call_next(request)
+        if request.url.path in _SIGNED_PROVIDER_CALLBACK_PATHS:
+            return await call_next(request)
         key = request.headers.get("X-API-Key", "")
-        if not secrets.compare_digest(key, _PLMKR_API_KEY):
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Invalid or missing X-API-Key header"},
-            )
-        return await call_next(request)
+        if secrets.compare_digest(key, _PLMKR_API_KEY):
+            return await call_next(request)
+        if identity_configured():
+            try:
+                token = bearer_token(request.headers.get("Authorization", ""))
+                decode_session(token)
+                return await call_next(request)
+            except ArtistAuthError:
+                pass
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Invalid or missing X-API-Key or artist authorization"},
+        )
 
 app.add_middleware(_APIKeyMiddleware)
 app.add_middleware(_TimingMiddleware)
@@ -1454,6 +1471,7 @@ def _delete_transcription_temp(path: str):
 async def transcribe(audio: UploadFile = File(...), request: Request = None):
     tmp = None
     try:
+        _authenticated_artist_id(request)
         filename = audio.filename or "voice.m4a"
         ext      = (os.path.splitext(filename)[1] or ".m4a").lower()
 
@@ -1517,7 +1535,7 @@ async def transcribe(audio: UploadFile = File(...), request: Request = None):
             _delete_transcription_temp(tmp)
 
 @app.post("/api/greet")
-async def greet(agent_id: str = Form(...), tts_on: str = Form(default="true", alias="tts")):
+async def greet(request: Request, agent_id: str = Form(...), tts_on: str = Form(default="true", alias="tts")):
     """
     Returns the agent's opening line when an artist enters a chat.
 
@@ -1525,6 +1543,7 @@ async def greet(agent_id: str = Form(...), tts_on: str = Form(default="true", al
     This was the single biggest source of unnecessary token spend during testing.
     Each agent has 3–5 handcrafted variants; Marcus has 5.
     """
+    _authenticated_artist_id(request)
     agent = AGENTS_BY_ID.get(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -1542,6 +1561,7 @@ async def greet(agent_id: str = Form(...), tts_on: str = Form(default="true", al
 
 @app.post("/api/handoff")
 async def handoff(
+    request: Request,
     agent_id:      str = Form(...),
     history:       str = Form(default="[]"),
     tts_on:        str = Form(default="true", alias="tts"),
@@ -1559,6 +1579,7 @@ async def handoff(
     reference something specific from the recent conversation. This fixes the
     generic "I'm routing you to X" wording from the previous version.
     """
+    artist_id = _require_artist_scope(request, artist_id)
     if not ANTHROPIC_AVAILABLE:
         raise HTTPException(status_code=503, detail="AI unavailable: ANTHROPIC_API_KEY not configured")
     agent = AGENTS_BY_ID.get(agent_id)
@@ -8150,10 +8171,10 @@ class ChatStreamRequest(BaseModel):
     tts:       bool   = True
 
 @app.post("/api/chat_stream")
-async def chat_stream(req: ChatStreamRequest):
+async def chat_stream(req: ChatStreamRequest, request: Request):
     agent_id  = req.agent_id
     message   = req.message
-    artist_id = req.artist_id
+    artist_id = _require_artist_scope(request, req.artist_id)
     history   = req.history
     tts_on    = "true" if req.tts else "false"
     """
@@ -13916,7 +13937,8 @@ def _add_billing_history(data: dict, tier: str, amount: float):
     data["billing_history"] = data["billing_history"][:50]
 
 @app.post("/api/billing/create-checkout")
-async def create_checkout(payload: CheckoutRequest):
+async def create_checkout(payload: CheckoutRequest, request: Request):
+    scoped_artist_id = _require_artist_scope(request, payload.artist_id)
     if not STRIPE_AVAILABLE:
         raise HTTPException(status_code=503, detail="Billing unavailable — STRIPE_SECRET_KEY not set")
     if payload.tier not in PRICE_IDS:
@@ -13928,12 +13950,12 @@ async def create_checkout(payload: CheckoutRequest):
                 "price": PRICE_IDS[payload.tier],
                 "quantity": 1,
             }],
-            client_reference_id=payload.artist_id,
-            metadata={"artist_id": payload.artist_id, "tier": payload.tier},
+            client_reference_id=scoped_artist_id,
+            metadata={"artist_id": scoped_artist_id, "tier": payload.tier},
             success_url=f"{APP_BASE_URL}/static/billing-success.html",
             cancel_url=f"{APP_BASE_URL}/static/billing-cancel.html",
         )
-        print(f"[STRIPE] checkout session created for {payload.artist_id} → {payload.tier}")
+        print(f"[STRIPE] checkout session created for {scoped_artist_id} → {payload.tier}")
         return {"url": session.url, "session_id": session.id}
     except stripe_lib.error.StripeError as e:
         raise HTTPException(status_code=502, detail=str(e.user_message or e))
@@ -13996,9 +14018,10 @@ async def billing_webhook(request: Request):
     return {"received": True}
 
 @app.get("/api/billing/history")
-async def get_billing_history(artist_id: str):
+async def get_billing_history(artist_id: str, request: Request):
+    scoped_artist_id = _require_artist_scope(request, artist_id)
     try:
-        _, data = _load_artist_file(artist_id)
+        _, data = _load_artist_file(scoped_artist_id)
         return {"history": data.get("billing_history", [])}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

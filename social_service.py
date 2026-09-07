@@ -346,31 +346,47 @@ class SocialPostPatch(BaseModel):
 
 
 @router.get("/api/social/posts", tags=["social"])
-def list_posts(artist_id: str, platform: str = "", status: str = ""):
+def list_posts(artist_id: str, platform: str = "", status: str = "", request: Request = None):
+    try:
+        artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     return {"posts": _db_list_posts(artist_id, platform=platform, status=status)}
 
 
 @router.get("/api/social/posts/{post_id}", tags=["social"])
-def get_post(post_id: str):
+def get_post(post_id: str, request: Request = None):
     p = _db_get_post(post_id)
     if not p:
         raise HTTPException(status_code=404, detail="Post not found")
+    try:
+        require_artist_scope(request, p["artist_id"])
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     return p
 
 
 @router.post("/api/social/posts", status_code=201, tags=["social"])
-def create_post(p: SocialPostIn):
+def create_post(p: SocialPostIn, request: Request = None):
+    try:
+        scoped_artist_id = require_artist_scope(request, p.artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     new_id = str(uuid.uuid4())
-    row    = {**p.model_dump(), "id": new_id}
+    row    = {**p.model_dump(), "artist_id": scoped_artist_id, "id": new_id}
     _db_create_post(row)
     return row
 
 
 @router.patch("/api/social/posts/{post_id}", tags=["social"])
-def patch_post(post_id: str, patch: SocialPostPatch):
+def patch_post(post_id: str, patch: SocialPostPatch, request: Request = None):
     existing = _db_get_post(post_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Post not found")
+    try:
+        require_artist_scope(request, existing["artist_id"])
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     updates = {k: v for k, v in patch.model_dump().items() if v is not None}
     if updates:
         _db_update_post(post_id, updates)
@@ -378,10 +394,14 @@ def patch_post(post_id: str, patch: SocialPostPatch):
 
 
 @router.delete("/api/social/posts/{post_id}", status_code=204, tags=["social"])
-def delete_post(post_id: str):
+def delete_post(post_id: str, request: Request = None):
     p = _db_get_post(post_id)
     if not p:
         raise HTTPException(status_code=404, detail="Post not found")
+    try:
+        require_artist_scope(request, p["artist_id"])
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     _db_delete_post(post_id)
 
 
@@ -757,13 +777,17 @@ class GeneratePostRequest(BaseModel):
 
 
 @router.post("/api/social/posts/generate", tags=["social"])
-async def api_generate_post(req: GeneratePostRequest):
-    artist = _load_artist_data(req.artist_id)
+async def api_generate_post(req: GeneratePostRequest, request: Request = None):
+    try:
+        artist_id = require_artist_scope(request, req.artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    artist = _load_artist_data(artist_id)
     try:
         draft = await generate_social_post(artist, req.platform, req.context, req.tone)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Post generation failed: {e}")
-    return {**draft, "artist_id": req.artist_id, "platform": req.platform}
+    return {**draft, "artist_id": artist_id, "platform": req.platform}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -782,8 +806,12 @@ class BatchPostRequest(BaseModel):
 
 
 @router.post("/api/social/posts/batch", tags=["social"])
-async def schedule_posts(req: BatchPostRequest):
+async def schedule_posts(req: BatchPostRequest, request: Request = None):
     """Generate draft posts; consequential Buffer scheduling uses operations only."""
+    try:
+        artist_id = require_artist_scope(request, req.artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     if req.schedule_buffer:
         raise HTTPException(
             status_code=409,
@@ -793,7 +821,7 @@ async def schedule_posts(req: BatchPostRequest):
                 "message": "Direct Buffer scheduling is disabled. Save drafts, then create/approve durable operations.",
             },
         )
-    artist  = _load_artist_data(req.artist_id)
+    artist  = _load_artist_data(artist_id)
     results: dict = {
         "generated": 0,
         "scheduled_via_buffer": 0,
@@ -830,7 +858,7 @@ async def schedule_posts(req: BatchPostRequest):
             post_id = str(uuid.uuid4())
             post    = {
                 "id":           post_id,
-                "artist_id":    req.artist_id,
+                "artist_id":    artist_id,
                 "platform":     platform,
                 "content":      draft["content"],
                 "media_url":    "",
@@ -844,7 +872,7 @@ async def schedule_posts(req: BatchPostRequest):
             if req.schedule_buffer and req.buffer_profile_ids:
                 try:
                     buf = await _buffer_schedule_post(
-                        req.artist_id, draft["content"],
+                        artist_id, draft["content"],
                         req.buffer_profile_ids, scheduled_at=scheduled_at,
                     )
                     _db_update_post(post_id, {
@@ -931,15 +959,23 @@ def _db_save_report(r: dict):
 
 
 @router.get("/api/reports/weekly", tags=["reports"])
-def list_weekly_reports(artist_id: str, limit: int = 12):
+def list_weekly_reports(artist_id: str, limit: int = 12, request: Request = None):
+    try:
+        artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     return {"reports": _db_list_reports(artist_id, limit=limit)}
 
 
 @router.get("/api/reports/weekly/{report_id}", tags=["reports"])
-def get_weekly_report(report_id: str):
+def get_weekly_report(report_id: str, request: Request = None):
     r = _db_get_report(report_id)
     if not r:
         raise HTTPException(status_code=404, detail="Report not found")
+    try:
+        require_artist_scope(request, r["artist_id"])
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     return r
 
 
@@ -950,9 +986,13 @@ class GenerateReportRequest(BaseModel):
 
 
 @router.post("/api/reports/weekly/generate", tags=["reports"])
-async def api_generate_weekly_report(req: GenerateReportRequest):
+async def api_generate_weekly_report(req: GenerateReportRequest, request: Request = None):
     try:
-        report = await generate_weekly_report(req.artist_id, req.week_start, req.week_end)
+        artist_id = require_artist_scope(request, req.artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    try:
+        report = await generate_weekly_report(artist_id, req.week_start, req.week_end)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Report generation failed: {e}")
     return report

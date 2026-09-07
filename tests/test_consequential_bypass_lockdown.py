@@ -105,3 +105,20 @@ def test_social_batch_buffer_mode_is_blocked_before_generation(monkeypatch):
         assert exc.detail["code"] == "durable_operation_required"
     else:
         raise AssertionError("Buffer bypass should be blocked")
+
+
+def test_legacy_followup_routes_cannot_send_provider_messages(monkeypatch):
+    forbidden = AsyncMock(side_effect=AssertionError("provider path reached"))
+    monkeypatch.setattr(pitch_service, "send_email", forbidden)
+
+    cases = (
+        (pitch_service.router, "/api/pitches/followups/queue"),
+        (pr_service.router, "/api/pr-outreach/followups/queue"),
+        (booking_service.router, "/api/booking-inquiries/followups/queue"),
+    )
+    for router, path in cases:
+        response = _client(router).post(path, params={"artist_id": "artist-a"})
+        assert response.status_code == 409, (path, response.text)
+        assert response.json()["detail"]["code"] == "durable_operation_required"
+
+    forbidden.assert_not_awaited()

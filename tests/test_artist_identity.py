@@ -70,6 +70,30 @@ def login(identity_client, phone):
     return data
 
 
+def test_otp_bootstrap_does_not_require_a_mobile_embedded_api_secret(identity_client):
+    sent = identity_client.post(
+        "/api/auth/send-otp",
+        json={"phone": "+1 555 101 9999"},
+    )
+    assert sent.status_code == 200, sent.text
+
+    verified = identity_client.post(
+        "/api/auth/verify-otp",
+        json={"phone": "+1 555 101 9999", "code": "000000"},
+    )
+    assert verified.status_code == 200, verified.text
+    assert verified.json()["access_token"]
+
+
+def test_bearer_session_satisfies_customer_middleware_without_api_key(identity_client):
+    artist = login(identity_client, "+1 555 102 9999")
+    response = identity_client.get(
+        f"/api/artist?artist_id={artist['artist_id']}",
+        headers={"Authorization": f"Bearer {artist['access_token']}"},
+    )
+    assert response.status_code == 200, response.text
+
+
 def headers(session):
     return {
         "X-API-Key": API_KEY,
@@ -217,6 +241,86 @@ def test_cross_artist_operations_gmail_buffer_and_notifications_are_denied(
         headers=artist_a_headers,
     )
     assert notifications.status_code == 404, notifications.text
+
+
+def test_cross_artist_chat_handoff_and_billing_are_denied(identity_client):
+    artist_a = login(identity_client, "+1 555 701 0001")
+    artist_b = login(identity_client, "+1 555 701 0002")
+    artist_a_headers = headers(artist_a)
+    artist_b_id = artist_b["artist_id"]
+
+    chat = identity_client.post(
+        "/api/chat_stream",
+        json={
+            "artist_id": artist_b_id,
+            "agent_id": "puppet-master",
+            "message": "__greet__",
+            "tts": False,
+        },
+        headers=artist_a_headers,
+    )
+    assert chat.status_code == 404, chat.text
+
+    handoff = identity_client.post(
+        "/api/handoff",
+        data={
+            "artist_id": artist_b_id,
+            "agent_id": "grid-prophet",
+            "history": "[]",
+            "tts": "false",
+        },
+        headers=artist_a_headers,
+    )
+    assert handoff.status_code == 404, handoff.text
+
+    billing_history = identity_client.get(
+        f"/api/billing/history?artist_id={artist_b_id}",
+        headers=artist_a_headers,
+    )
+    assert billing_history.status_code == 404, billing_history.text
+
+    checkout = identity_client.post(
+        "/api/billing/create-checkout",
+        json={"artist_id": artist_b_id, "tier": "Starter"},
+        headers=artist_a_headers,
+    )
+    assert checkout.status_code == 404, checkout.text
+
+
+def test_cross_artist_campaign_resources_are_not_addressable_by_id(identity_client):
+    artist_a = login(identity_client, "+1 555 801 0001")
+    artist_b = login(identity_client, "+1 555 801 0002")
+    artist_a_headers = headers(artist_a)
+    artist_b_id = artist_b["artist_id"]
+
+    created = identity_client.post(
+        "/api/social/posts",
+        json={
+            "artist_id": artist_b["artist_id"],
+            "platform": "instagram",
+            "content": "Private campaign draft",
+        },
+        headers=headers(artist_b),
+    )
+    assert created.status_code == 201, created.text
+    post_id = created.json()["id"]
+
+    for method, path, kwargs in (
+        ("get", f"/api/social/posts/{post_id}", {}),
+        ("patch", f"/api/social/posts/{post_id}", {"json": {"content": "Stolen"}}),
+        ("delete", f"/api/social/posts/{post_id}", {}),
+        ("get", f"/api/social/posts?artist_id={artist_b['artist_id']}", {}),
+        ("get", f"/api/pitches?artist_id={artist_b['artist_id']}", {}),
+        ("get", f"/api/pr-outreach?artist_id={artist_b['artist_id']}", {}),
+        ("get", f"/api/booking-inquiries?artist_id={artist_b['artist_id']}", {}),
+        ("get", f"/api/reports/weekly?artist_id={artist_b['artist_id']}", {}),
+    ):
+        response = getattr(identity_client, method)(
+            path,
+            headers=headers(artist_a),
+            **kwargs,
+        )
+        assert response.status_code == 404, (method, path, response.text)
 
     notification_send = identity_client.post(
         "/api/notifications/send",
