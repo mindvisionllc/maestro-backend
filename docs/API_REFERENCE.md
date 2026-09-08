@@ -75,6 +75,7 @@ Sorted alphabetically by path.
 | GET | `/api/operations` | Yes (X-API-Key) | List Operations |
 | GET | `/api/operations/{operation_id}` | Yes (X-API-Key) | Get Operation |
 | POST | `/api/operations/{operation_id}/approve` | Yes (X-API-Key) | Approve Operation |
+| POST | `/api/operations/{operation_id}/ready` | Yes (X-API-Key) | Mark Operation Ready |
 | POST | `/api/operations/{operation_id}/execute` | Yes (X-API-Key) | Execute Operation |
 | POST | `/api/operations/{operation_id}/reconcile` | Yes (X-API-Key) | Reconcile Operation |
 | GET | `/api/pitches` | Yes (X-API-Key) | List Pitches |
@@ -631,6 +632,15 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 - **Query params:** `artist_id` (string, required)
 - **Response:** 200 — operation object with non-null `approved_at`
 
+#### POST /api/operations/{operation_id}/ready
+
+- **Summary:** Mark Operation Ready — durably record the artist's final execution-detail confirmation after approval
+- **Auth:** Yes (X-API-Key)
+- **Path params:** `operation_id` (string, required)
+- **Query params:** `artist_id` (string, required)
+- **Response:** 200 — operation object with non-null `approved_at` and `ready_at`
+- **Failures:** 409 when the operation has not been approved or is no longer executable
+
 #### POST /api/operations/{operation_id}/execute
 
 - **Summary:** Execute Operation — execute an approved operation at most once unless a failure is known to be safely retryable
@@ -638,7 +648,7 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 - **Path params:** `operation_id` (string, required)
 - **Query params:** `artist_id` (string, required)
 - **Response:** 200 — durable operation object
-- **Failures:** 409 when the operation has not been approved
+- **Failures:** 409 when the operation has not been approved and marked ready
 - **Safety:** A provider response without a stable provider reference is recorded as `unknown` and requires reconciliation; it is never treated as a successful completion or automatically retried
 
 #### POST /api/operations/execute
@@ -1152,7 +1162,7 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 
 Legacy direct execution routes are retained as explicit HTTP 409 tripwires for beta migration.
 Gmail sends and Buffer scheduling must use the durable `/api/operations` lifecycle:
-create -> approve -> execute (and reconcile when required). Batch pitch, PR, booking, and
+create -> approve -> ready -> execute (and reconcile when required). Batch pitch, PR, booking, and
 direct Buffer scheduling routes may generate/save drafts but may not dispatch providers.
 
 ## Authenticated artist identity

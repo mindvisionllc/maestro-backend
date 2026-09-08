@@ -46,7 +46,8 @@ def _gmail_request(key="gmail-key", body="Hello"):
 
 
 def _approve(svc, operation):
-    return svc.approve_operation(operation["id"], artist_id=operation["artist_id"])
+    approved = svc.approve_operation(operation["id"], artist_id=operation["artist_id"])
+    return svc.mark_operation_ready(approved["id"], artist_id=operation["artist_id"])
 
 
 def test_create_is_idempotent_and_conflicting_payload_is_rejected(services):
@@ -413,6 +414,22 @@ def test_unapproved_operation_never_calls_provider(services, monkeypatch):
     assert exc.value.detail["code"] == "operation_not_approved"
     send.assert_not_called()
     assert svc._get_operation(operation["id"])["status"] == "pending"
+
+
+def test_approved_operation_requires_final_readiness_before_provider(services, monkeypatch):
+    svc, pitch, _, _ = services
+    send = MagicMock()
+    monkeypatch.setattr(pitch, "send_email", send)
+    operation, _ = svc._create_or_get_operation(**_gmail_request())
+    svc.approve_operation(operation["id"], artist_id=operation["artist_id"])
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(svc.execute_operation(operation["id"]))
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "operation_not_ready"
+    send.assert_not_called()
+    assert svc._get_operation(operation["id"])["approved_at"]
+    assert svc._get_operation(operation["id"])["ready_at"] is None
 
 
 @pytest.mark.parametrize(

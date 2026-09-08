@@ -98,6 +98,8 @@ def init_execution_db():
         conn.execute("ALTER TABLE execution_operations ADD COLUMN profile_binding TEXT")
     if "approved_at" not in existing_cols:
         conn.execute("ALTER TABLE execution_operations ADD COLUMN approved_at TEXT")
+    if "ready_at" not in existing_cols:
+        conn.execute("ALTER TABLE execution_operations ADD COLUMN ready_at TEXT")
     conn.execute(
         """CREATE UNIQUE INDEX IF NOT EXISTS uq_execution_operation_resource
            ON execution_operations (action_type, resource_key)
@@ -122,7 +124,7 @@ def init_execution_db():
 _OP_COLS = [
     "id", "artist_id", "action_type", "idempotency_key", "payload", "status",
     "provider", "provider_reference", "provider_result", "correlation_key",
-    "resource_key", "profile_binding", "approved_at", "attempt_count",
+    "resource_key", "profile_binding", "approved_at", "ready_at", "attempt_count",
     "error_code", "error_detail", "created_at", "updated_at",
     "provider_started_at", "completed_at", "reconciled_at",
 ]
@@ -346,6 +348,16 @@ def _claim_pending(operation_id: str) -> tuple[dict, bool]:
                     "message": "Approve the durable operation before execution.",
                 },
             )
+        if not operation["ready_at"]:
+            conn.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "operation_not_ready",
+                    "operation_id": operation_id,
+                    "message": "Confirm the final execution details before dispatch.",
+                },
+            )
         timestamp = _now()
         conn.execute(
             """UPDATE execution_operations
@@ -455,6 +467,39 @@ def approve_operation(operation_id: str, artist_id: Optional[str] = None) -> dic
     conn.execute(
         """UPDATE execution_operations
            SET approved_at=COALESCE(approved_at, ?), updated_at=?
+           WHERE id=? AND status IN ('pending','failed_retryable')""",
+        (timestamp, timestamp, operation_id),
+    )
+    conn.commit()
+    conn.close()
+    return _get_operation(operation_id)
+
+
+def mark_operation_ready(operation_id: str, artist_id: Optional[str] = None) -> dict:
+    """Record the artist's final execution-detail confirmation."""
+    operation = _get_operation(operation_id)
+    if not operation:
+        raise HTTPException(status_code=404, detail="Operation not found")
+    _require_operation_owner(operation, artist_id)
+    if operation["status"] not in EXECUTABLE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "operation_not_ready", "status": operation["status"]},
+        )
+    if not operation["approved_at"]:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "operation_not_approved",
+                "operation_id": operation_id,
+                "message": "Approve the durable operation before confirming readiness.",
+            },
+        )
+    timestamp = _now()
+    conn = sqlite3.connect(str(_DB_PATH))
+    conn.execute(
+        """UPDATE execution_operations
+           SET ready_at=COALESCE(ready_at, ?), updated_at=?
            WHERE id=? AND status IN ('pending','failed_retryable')""",
         (timestamp, timestamp, operation_id),
     )
@@ -765,6 +810,19 @@ def api_approve_operation(
     except ArtistAuthError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return approve_operation(operation_id, artist_id=scoped_artist_id)
+
+
+@router.post("/api/operations/{operation_id}/ready", tags=["operations"])
+def api_mark_operation_ready(
+    operation_id: str,
+    artist_id: str,
+    request: Request = None,
+):
+    try:
+        scoped_artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return mark_operation_ready(operation_id, artist_id=scoped_artist_id)
 
 
 
