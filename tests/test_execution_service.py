@@ -300,6 +300,38 @@ def test_social_post_can_only_be_bound_to_one_operation(services):
     assert exc.value.detail["operation_id"] == first["id"]
 
 
+def test_social_resource_conflict_does_not_disclose_other_artist_operation(services):
+    svc, _, social, _ = services
+    social._db_create_post({
+        "id": "post-cross-artist",
+        "artist_id": "artist-1",
+        "platform": "instagram",
+        "content": "Artist-owned draft",
+        "status": "draft",
+    })
+    first, _ = svc._create_or_get_operation(
+        artist_id="artist-1",
+        action_type="social.buffer.schedule",
+        idempotency_key="artist-one-key",
+        payload={"post_id": "post-cross-artist", "buffer_profile_ids": ["profile-1"]},
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        svc._create_or_get_operation(
+            artist_id="artist-2",
+            action_type="social.buffer.schedule",
+            idempotency_key="artist-two-key",
+            payload={"post_id": "post-cross-artist", "buffer_profile_ids": ["profile-1"]},
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == {
+        "code": "resource_already_has_operation",
+        "message": "This social post is already bound to an execution operation.",
+    }
+    assert first["id"] not in str(exc.value.detail)
+
+
 def test_operation_owner_mismatch_is_hidden(services):
     svc, _, _, _ = services
     operation, _ = svc._create_or_get_operation(**_gmail_request())

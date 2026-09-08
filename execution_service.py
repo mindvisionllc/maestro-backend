@@ -300,13 +300,18 @@ def _create_or_get_operation(
             ).fetchone()
             conn.close()
             conflicting = _row_to_operation(conflicting_row)
+            # Resource IDs are normally globally unique, but never assume
+            # that when constructing an error response.  A caller must not
+            # learn another artist's operation ID through a collision.
+            detail = {
+                "code": "resource_already_has_operation",
+                "message": "This social post is already bound to an execution operation.",
+            }
+            if conflicting.get("artist_id") == artist_id:
+                detail["operation_id"] = conflicting["id"]
             raise HTTPException(
                 status_code=409,
-                detail={
-                    "code": "resource_already_has_operation",
-                    "operation_id": conflicting["id"],
-                    "message": "This social post is already bound to an execution operation.",
-                },
+                detail=detail,
             )
         conn.close()
         existing = _row_to_operation(row)
