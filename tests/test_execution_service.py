@@ -92,6 +92,26 @@ def test_operation_events_preserve_artist_approval_and_dispatch_history(services
     assert result["events"][-1]["metadata"]["provider_reference"] == "event-msg"
 
 
+def test_creation_rolls_back_when_its_history_event_cannot_be_recorded(services, monkeypatch):
+    svc, _, _, db = services
+    original = svc._insert_operation_event
+
+    def fail_history(*args, **kwargs):
+        raise sqlite3.OperationalError("history unavailable")
+
+    monkeypatch.setattr(svc, "_insert_operation_event", fail_history)
+    with pytest.raises(sqlite3.OperationalError):
+        svc._create_or_get_operation(**_gmail_request(key="atomic-create"))
+
+    conn = sqlite3.connect(str(db))
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_operations WHERE idempotency_key=?",
+        ("atomic-create",),
+    ).fetchone()[0] == 0
+    conn.close()
+    monkeypatch.setattr(svc, "_insert_operation_event", original)
+
+
 def test_operation_events_are_artist_scoped(services):
     svc, _, _, _ = services
     operation, _ = svc._create_or_get_operation(**_gmail_request(key="event-scope"))

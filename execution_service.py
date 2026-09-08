@@ -135,16 +135,13 @@ def init_execution_db():
            WHERE status='executing'""",
         (_now(),),
     )
-    conn.commit()
-    conn.close()
     for operation_id, artist_id in interrupted_operations:
-        _record_operation_event(
-            operation_id,
-            artist_id,
-            "process_interrupted",
-            "unknown",
+        _insert_operation_event(
+            conn, operation_id, artist_id, "process_interrupted", "unknown",
             from_status="executing",
         )
+    conn.commit()
+    conn.close()
     log.info("db_ready", extra={"event": "db_ready", "svc": "execution_service"})
 
 
@@ -209,6 +206,30 @@ def _record_operation_event(
     metadata: Optional[dict] = None,
 ):
     conn = sqlite3.connect(str(_DB_PATH))
+    _insert_operation_event(
+        conn, operation_id, artist_id, event_type, to_status,
+        from_status=from_status, metadata=metadata,
+    )
+    conn.commit()
+    conn.close()
+
+
+def _insert_operation_event(
+    conn,
+    operation_id: str,
+    artist_id: str,
+    event_type: str,
+    to_status: str,
+    *,
+    from_status: Optional[str] = None,
+    metadata: Optional[dict] = None,
+):
+    """Append an event using an existing transaction.
+
+    State changes and their audit records must share a transaction.  Keeping
+    this small primitive separate also lets the recovery path record its
+    interruption event before exposing the recovered operation.
+    """
     conn.execute(
         """INSERT INTO execution_operation_events
            (operation_id, artist_id, event_type, from_status, to_status, metadata, occurred_at)
@@ -218,8 +239,6 @@ def _record_operation_event(
             json.dumps(metadata or {}, sort_keys=True, separators=(",", ":")), _now(),
         ),
     )
-    conn.commit()
-    conn.close()
 
 
 def _get_operation(operation_id: str) -> dict:
@@ -352,6 +371,9 @@ def _create_or_get_operation(
                 timestamp, timestamp,
             ),
         )
+        _insert_operation_event(
+            conn, operation_id, artist_id, "created", "pending",
+        )
         conn.commit()
         created = True
     except sqlite3.IntegrityError:
@@ -402,8 +424,6 @@ def _create_or_get_operation(
                 },
             )
         return existing, False
-    operation = _get_operation(operation_id)
-    _record_operation_event(operation_id, operation["artist_id"], "created", operation["status"])
     return _get_operation(operation_id), True
 
 
@@ -450,16 +470,17 @@ def _claim_pending(operation_id: str) -> tuple[dict, bool]:
                WHERE id=?""",
             (timestamp, timestamp, operation_id),
         )
+        _insert_operation_event(
+            conn,
+            operation_id,
+            operation["artist_id"],
+            "dispatch_started",
+            "executing",
+            from_status=operation["status"],
+            metadata={"attempt_count": operation["attempt_count"] + 1},
+        )
         conn.commit()
         claimed_operation = _get_operation(operation_id)
-        _record_operation_event(
-            operation_id,
-            claimed_operation["artist_id"],
-            "dispatch_started",
-            claimed_operation["status"],
-            from_status=operation["status"],
-            metadata={"attempt_count": claimed_operation["attempt_count"]},
-        )
         return claimed_operation, True
     finally:
         conn.close()
@@ -501,18 +522,20 @@ def _finish(
                error_code=?, error_detail=?, updated_at=?,
                 completed_at=CASE WHEN ? IN ('succeeded','failed') THEN ? ELSE completed_at END,
                reconciled_at=CASE WHEN ? THEN ? ELSE reconciled_at END
-           """ + where,
+        """ + where,
         params,
     )
-    conn.commit()
-    conn.close()
-    operation = _get_operation(operation_id)
     if cursor.rowcount == 1:
-        _record_operation_event(
+        artist_row = conn.execute(
+            "SELECT artist_id FROM execution_operations WHERE id=?",
+            (operation_id,),
+        ).fetchone()
+        _insert_operation_event(
+            conn,
             operation_id,
-            operation["artist_id"],
+            artist_row[0],
             "reconciled" if reconciled else "dispatch_finished",
-            operation["status"],
+            status,
             from_status=expected_status or "executing",
             metadata={
                 key: value for key, value in {
@@ -521,6 +544,8 @@ def _finish(
                 }.items() if value is not None
             },
         )
+    conn.commit()
+    conn.close()
     return _get_operation(operation_id)
 
 
@@ -578,13 +603,12 @@ def approve_operation(operation_id: str, artist_id: Optional[str] = None) -> dic
            WHERE id=? AND status IN ('pending','failed_retryable')""",
         (timestamp, timestamp, operation_id),
     )
+    if cursor.rowcount == 1 and not operation["approved_at"]:
+        _insert_operation_event(
+            conn, operation_id, operation["artist_id"], "artist_approved", operation["status"],
+        )
     conn.commit()
     conn.close()
-    updated = _get_operation(operation_id)
-    if cursor.rowcount == 1 and not operation["approved_at"]:
-        _record_operation_event(
-            operation_id, updated["artist_id"], "artist_approved", updated["status"]
-        )
     return _get_operation(operation_id)
 
 
@@ -616,13 +640,12 @@ def mark_operation_ready(operation_id: str, artist_id: Optional[str] = None) -> 
            WHERE id=? AND status IN ('pending','failed_retryable')""",
         (timestamp, timestamp, operation_id),
     )
+    if cursor.rowcount == 1 and not operation["ready_at"]:
+        _insert_operation_event(
+            conn, operation_id, operation["artist_id"], "execution_ready", operation["status"],
+        )
     conn.commit()
     conn.close()
-    updated = _get_operation(operation_id)
-    if cursor.rowcount == 1 and not operation["ready_at"]:
-        _record_operation_event(
-            operation_id, updated["artist_id"], "execution_ready", updated["status"]
-        )
     return _get_operation(operation_id)
 
 
