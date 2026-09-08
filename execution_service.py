@@ -596,19 +596,41 @@ def approve_operation(operation_id: str, artist_id: Optional[str] = None) -> dic
             },
         )
     timestamp = _now()
-    conn = sqlite3.connect(str(_DB_PATH))
-    cursor = conn.execute(
-        """UPDATE execution_operations
-           SET approved_at=COALESCE(approved_at, ?), updated_at=?
-           WHERE id=? AND status IN ('pending','failed_retryable')""",
-        (timestamp, timestamp, operation_id),
-    )
-    if cursor.rowcount == 1 and not operation["approved_at"]:
-        _insert_operation_event(
-            conn, operation_id, operation["artist_id"], "artist_approved", operation["status"],
-        )
-    conn.commit()
-    conn.close()
+    conn = sqlite3.connect(str(_DB_PATH), timeout=10)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute(
+            f"SELECT {','.join(_OP_COLS)} FROM execution_operations WHERE id=?",
+            (operation_id,),
+        ).fetchone()
+        if not current:
+            conn.rollback()
+            raise HTTPException(status_code=404, detail="Operation not found")
+        current_operation = _row_to_operation(current)
+        _require_operation_owner(current_operation, artist_id)
+        if current_operation["status"] not in EXECUTABLE_STATUSES:
+            conn.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "operation_not_approvable",
+                    "status": current_operation["status"],
+                },
+            )
+        if not current_operation["approved_at"]:
+            conn.execute(
+                """UPDATE execution_operations
+                   SET approved_at=?, updated_at=?
+                   WHERE id=?""",
+                (timestamp, timestamp, operation_id),
+            )
+            _insert_operation_event(
+                conn, operation_id, current_operation["artist_id"],
+                "artist_approved", current_operation["status"],
+            )
+        conn.commit()
+    finally:
+        conn.close()
     return _get_operation(operation_id)
 
 
@@ -633,19 +655,48 @@ def mark_operation_ready(operation_id: str, artist_id: Optional[str] = None) -> 
             },
         )
     timestamp = _now()
-    conn = sqlite3.connect(str(_DB_PATH))
-    cursor = conn.execute(
-        """UPDATE execution_operations
-           SET ready_at=COALESCE(ready_at, ?), updated_at=?
-           WHERE id=? AND status IN ('pending','failed_retryable')""",
-        (timestamp, timestamp, operation_id),
-    )
-    if cursor.rowcount == 1 and not operation["ready_at"]:
-        _insert_operation_event(
-            conn, operation_id, operation["artist_id"], "execution_ready", operation["status"],
-        )
-    conn.commit()
-    conn.close()
+    conn = sqlite3.connect(str(_DB_PATH), timeout=10)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute(
+            f"SELECT {','.join(_OP_COLS)} FROM execution_operations WHERE id=?",
+            (operation_id,),
+        ).fetchone()
+        if not current:
+            conn.rollback()
+            raise HTTPException(status_code=404, detail="Operation not found")
+        current_operation = _row_to_operation(current)
+        _require_operation_owner(current_operation, artist_id)
+        if current_operation["status"] not in EXECUTABLE_STATUSES:
+            conn.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "operation_not_ready", "status": current_operation["status"]},
+            )
+        if not current_operation["approved_at"]:
+            conn.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "operation_not_approved",
+                    "operation_id": operation_id,
+                    "message": "Approve the durable operation before confirming readiness.",
+                },
+            )
+        if not current_operation["ready_at"]:
+            conn.execute(
+                """UPDATE execution_operations
+                   SET ready_at=?, updated_at=?
+                   WHERE id=?""",
+                (timestamp, timestamp, operation_id),
+            )
+            _insert_operation_event(
+                conn, operation_id, current_operation["artist_id"],
+                "execution_ready", current_operation["status"],
+            )
+        conn.commit()
+    finally:
+        conn.close()
     return _get_operation(operation_id)
 
 

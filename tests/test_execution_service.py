@@ -112,6 +112,55 @@ def test_creation_rolls_back_when_its_history_event_cannot_be_recorded(services,
     monkeypatch.setattr(svc, "_insert_operation_event", original)
 
 
+def test_approval_rolls_back_when_history_event_cannot_be_recorded(services, monkeypatch):
+    svc, _, _, _ = services
+    operation, _ = svc._create_or_get_operation(**_gmail_request(key="atomic-approval"))
+
+    def fail_history(*args, **kwargs):
+        raise sqlite3.OperationalError("history unavailable")
+
+    monkeypatch.setattr(svc, "_insert_operation_event", fail_history)
+    with pytest.raises(sqlite3.OperationalError):
+        svc.approve_operation(operation["id"], artist_id=operation["artist_id"])
+
+    current = svc._get_operation(operation["id"])
+    assert current["approved_at"] is None
+    assert [event["event_type"] for event in current["events"]] == ["created"]
+
+
+def test_readiness_rolls_back_when_history_event_cannot_be_recorded(services, monkeypatch):
+    svc, _, _, _ = services
+    operation, _ = svc._create_or_get_operation(**_gmail_request(key="atomic-ready"))
+    approved = svc.approve_operation(operation["id"], artist_id=operation["artist_id"])
+
+    def fail_history(*args, **kwargs):
+        raise sqlite3.OperationalError("history unavailable")
+
+    monkeypatch.setattr(svc, "_insert_operation_event", fail_history)
+    with pytest.raises(sqlite3.OperationalError):
+        svc.mark_operation_ready(approved["id"], artist_id=approved["artist_id"])
+
+    current = svc._get_operation(operation["id"])
+    assert current["ready_at"] is None
+    assert [event["event_type"] for event in current["events"]] == ["created", "artist_approved"]
+
+
+def test_approval_and_readiness_are_idempotent_without_duplicate_events(services):
+    svc, _, _, _ = services
+    operation, _ = svc._create_or_get_operation(**_gmail_request(key="idempotent-gates"))
+
+    first_approval = svc.approve_operation(operation["id"], artist_id=operation["artist_id"])
+    second_approval = svc.approve_operation(operation["id"], artist_id=operation["artist_id"])
+    first_ready = svc.mark_operation_ready(operation["id"], artist_id=operation["artist_id"])
+    second_ready = svc.mark_operation_ready(operation["id"], artist_id=operation["artist_id"])
+
+    assert second_approval["approved_at"] == first_approval["approved_at"]
+    assert second_ready["ready_at"] == first_ready["ready_at"]
+    assert [event["event_type"] for event in second_ready["events"]] == [
+        "created", "artist_approved", "execution_ready",
+    ]
+
+
 def test_operation_events_are_artist_scoped(services):
     svc, _, _, _ = services
     operation, _ = svc._create_or_get_operation(**_gmail_request(key="event-scope"))
