@@ -66,6 +66,42 @@ def test_create_is_idempotent_and_conflicting_payload_is_rejected(services):
     assert exc.value.detail["code"] == "idempotency_conflict"
 
 
+def test_operation_history_is_artist_scoped_bounded_and_filterable(services):
+    svc, _, _, _ = services
+    first, _ = svc._create_or_get_operation(**_gmail_request(key="history-old"))
+    newest_request = _gmail_request(key="history-newest")
+    newest, _ = svc._create_or_get_operation(**newest_request)
+    second_request = _gmail_request(key="history-new")
+    second_request["artist_id"] = "artist-2"
+    second, _ = svc._create_or_get_operation(**second_request)
+
+    _approve(svc, first)
+    conn = sqlite3.connect(str(svc._DB_PATH))
+    conn.execute(
+        "UPDATE execution_operations SET status='succeeded', updated_at=? WHERE id=?",
+        ("2099-01-01T00:00:00+00:00", newest["id"]),
+    )
+    conn.execute(
+        "UPDATE execution_operations SET updated_at=? WHERE id=?",
+        ("2026-01-01T00:00:00+00:00", first["id"]),
+    )
+    conn.commit()
+    conn.close()
+
+    history = svc._list_operations("artist-1")
+    assert [item["id"] for item in history] == [newest["id"], first["id"]]
+    assert [item["id"] for item in svc._list_operations("artist-1", limit=1)] == [newest["id"]]
+    assert svc._list_operations("artist-2")[0]["id"] == second["id"]
+    assert svc._list_operations("artist-1", status="succeeded")[0]["status"] == "succeeded"
+
+    with pytest.raises(HTTPException) as exc:
+        svc._list_operations("artist-1", limit=101)
+    assert exc.value.status_code == 422
+    with pytest.raises(HTTPException) as exc:
+        svc._list_operations("artist-1", status="not-a-status")
+    assert exc.value.status_code == 422
+
+
 @pytest.mark.parametrize(
     "action_type",
     ["pitch.send", "pr.send", "booking.send", "social.batch", "release.execute"],

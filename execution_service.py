@@ -153,6 +153,40 @@ def _get_operation(operation_id: str) -> dict:
     return _row_to_operation(row) if row else {}
 
 
+def _list_operations(
+    artist_id: str,
+    *,
+    limit: int = 50,
+    status: Optional[str] = None,
+) -> list[dict]:
+    """Return a bounded, newest-first execution history for one artist."""
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+    if status is not None and status not in {
+        "pending", "failed_retryable", "executing", "succeeded", "failed", "unknown",
+    }:
+        raise HTTPException(status_code=422, detail={"code": "invalid_operation_status"})
+
+    where = ["artist_id=?"]
+    params: list[object] = [artist_id]
+    if status is not None:
+        where.append("status=?")
+        params.append(status)
+    params.append(limit)
+
+    conn = sqlite3.connect(str(_DB_PATH))
+    rows = conn.execute(
+        f"""SELECT {','.join(_OP_COLS)}
+            FROM execution_operations
+            WHERE {' AND '.join(where)}
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?""",
+        params,
+    ).fetchall()
+    conn.close()
+    return [_row_to_operation(row) for row in rows]
+
+
 def _valid_single_email_target(value: str) -> bool:
     if any(char in value for char in ("\r", "\n", ",", ";")):
         return False
@@ -648,6 +682,23 @@ class OperationRequest(BaseModel):
     action_type: str
     idempotency_key: str
     payload: dict
+
+
+@router.get("/api/operations", tags=["operations"])
+def list_operations(
+    artist_id: str,
+    limit: int = 50,
+    status: Optional[str] = None,
+    request: Request = None,
+):
+    try:
+        scoped_artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {
+        "operations": _list_operations(scoped_artist_id, limit=limit, status=status),
+        "limit": limit,
+    }
 
 
 @router.post("/api/operations", tags=["operations"])
