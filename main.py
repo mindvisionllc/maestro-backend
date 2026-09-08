@@ -1062,7 +1062,8 @@ class _APIKeyMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         if request.method == "OPTIONS":  # CORS preflight must reach CORSMiddleware unblocked
             return await call_next(request)
-        if request.url.path in _SKIP_AUTH_PATHS:
+        if (request.url.path in _SKIP_AUTH_PATHS
+                or request.url.path.startswith("/static/agents/")):
             return await call_next(request)
         if request.url.path in _ARTIST_AUTH_BOOTSTRAP_PATHS:
             return await call_next(request)

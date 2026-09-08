@@ -136,3 +136,22 @@ def test_options_preflight_bypasses_auth(client_with_key):
     assert "access-control-allow-origin" in resp.headers, (
         "CORS preflight response missing Access-Control-Allow-Origin header"
     )
+
+
+
+def test_agent_portraits_are_public_but_api_routes_remain_protected(client_with_key):
+    portrait = client_with_key.get(
+        "/static/agents/marcus.jpg",
+        follow_redirects=False,
+    )
+    assert portrait.status_code in (200, 302)
+
+    if portrait.status_code == 200:
+        assert portrait.headers["content-type"].startswith("image/")
+    else:
+        location = portrait.headers["location"]
+        assert location.startswith("https://res.cloudinary.com/")
+        assert location.endswith("/marcus.jpg")
+
+    protected = client_with_key.get("/api/gmail/status?artist_id=test")
+    assert protected.status_code == 401
