@@ -325,6 +325,56 @@ def test_cross_artist_operations_gmail_buffer_and_notifications_are_denied(
     artist_a_headers = headers(artist_a)
     artist_b_id = artist_b["artist_id"]
 
+    own_operation = identity_client.post(
+        "/api/operations",
+        json={
+            "artist_id": artist_a["artist_id"],
+            "action_type": "gmail.send",
+            "idempotency_key": "artist-a-history",
+            "payload": {
+                "to": "recipient@example.com",
+                "subject": "Prepared",
+                "body": "Prepared",
+            },
+        },
+        headers=artist_a_headers,
+    )
+    assert own_operation.status_code == 200, own_operation.text
+
+    other_operation = identity_client.post(
+        "/api/operations",
+        json={
+            "artist_id": artist_b_id,
+            "action_type": "gmail.send",
+            "idempotency_key": "artist-b-history",
+            "payload": {
+                "to": "recipient@example.com",
+                "subject": "Private",
+                "body": "Private",
+            },
+        },
+        headers=headers(artist_b),
+    )
+    assert other_operation.status_code == 200, other_operation.text
+
+    own_history = identity_client.get(
+        "/api/operations",
+        params={"artist_id": artist_a["artist_id"], "limit": 1, "status": "pending"},
+        headers=artist_a_headers,
+    )
+    assert own_history.status_code == 200, own_history.text
+    assert own_history.json()["limit"] == 1
+    assert [item["id"] for item in own_history.json()["operations"]] == [
+        own_operation.json()["operation"]["id"]
+    ]
+
+    cross_artist_history = identity_client.get(
+        "/api/operations",
+        params={"artist_id": artist_b_id},
+        headers=artist_a_headers,
+    )
+    assert cross_artist_history.status_code == 404, cross_artist_history.text
+
     operation = identity_client.post(
         "/api/operations",
         json={

@@ -72,6 +72,7 @@ Sorted alphabetically by path.
 | POST | `/api/notifications/send` | Yes (X-API-Key) | Send Notification |
 | POST | `/api/operations` | Yes (X-API-Key) | Create Operation |
 | POST | `/api/operations/execute` | Yes (X-API-Key) | Create And Execute Operation |
+| GET | `/api/operations` | Yes (X-API-Key) | List Operations |
 | GET | `/api/operations/{operation_id}` | Yes (X-API-Key) | Get Operation |
 | POST | `/api/operations/{operation_id}/approve` | Yes (X-API-Key) | Approve Operation |
 | POST | `/api/operations/{operation_id}/execute` | Yes (X-API-Key) | Execute Operation |
@@ -606,6 +607,14 @@ Sorted alphabetically by path.
 ### operations — Durable approved provider execution
 
 Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR, booking, release, and batch operations are rejected.
+
+#### GET /api/operations
+
+- **Summary:** List Operations — return bounded, newest-first durable execution history for the authenticated artist
+- **Auth:** Yes (X-API-Key)
+- **Query params:** `artist_id` (string, required), `limit` (integer, 1–100, default 50), `status` (optional: `pending`, `failed_retryable`, `executing`, `succeeded`, `failed`, or `unknown`)
+- **Response:** 200 — `{ operations: operation[], limit }`
+- **Security:** `artist_id` is enforced against the authenticated artist session; another artist's history is never returned
 
 #### POST /api/operations
 
