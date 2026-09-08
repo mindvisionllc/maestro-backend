@@ -1,6 +1,5 @@
-# Exclude large agent photos from direct upload
-# (they are committed to GitHub and available via GitHub-linked deployment)
-static/agents/
+# Agent photos are required by the mobile client and are included in
+# direct Railway deployments.
 
 # Runtime data
 audio_cache/
