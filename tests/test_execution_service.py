@@ -411,6 +411,30 @@ def test_operation_owner_mismatch_is_hidden(services):
     assert exc.value.status_code == 404
 
 
+def test_combined_route_never_enters_execution_for_new_operation(services, monkeypatch):
+    svc, _, _, _ = services
+    monkeypatch.setattr(svc, "require_artist_scope", lambda _request, artist_id: artist_id)
+
+    async def unexpected_execution(*args, **kwargs):
+        raise AssertionError("new operations must not enter the execution path")
+
+    monkeypatch.setattr(svc, "execute_operation", unexpected_execution)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            svc.create_and_execute_operation(
+                svc.OperationRequest(**_gmail_request(key="combined-new")),
+                request=object(),
+            )
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "operation_not_approved"
+    operation = svc._list_operations("artist-1")[0]
+    assert operation["status"] == "pending"
+    assert operation["approved_at"] is None
+
+
 def test_reconcile_does_not_race_an_inflight_execution(services, monkeypatch):
     svc, _, _, db = services
     operation, _ = svc._create_or_get_operation(**_gmail_request())

@@ -912,6 +912,19 @@ async def create_and_execute_operation(req: OperationRequest, request: Request =
         req.idempotency_key,
         req.payload,
     )
+    # A newly-created operation has never passed through the artist approval
+    # and final-readiness gates. Do not enter the execution state machine for
+    # that convenience-route case; callers must use the explicit approval and
+    # readiness endpoints before dispatch is possible.
+    if created:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "operation_not_approved",
+                "operation_id": operation["id"],
+                "message": "Approve the durable operation and confirm final details before execution.",
+            },
+        )
     operation = await execute_operation(operation["id"], artist_id=artist_id)
     return {"operation": operation, "created": created}
 

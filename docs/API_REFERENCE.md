@@ -71,7 +71,7 @@ Sorted alphabetically by path.
 | POST | `/api/notifications/register` | Yes (X-API-Key) | Register Push Token |
 | POST | `/api/notifications/send` | Yes (X-API-Key) | Send Notification |
 | POST | `/api/operations` | Yes (X-API-Key) | Create Operation |
-| POST | `/api/operations/execute` | Yes (X-API-Key) | Create And Execute Operation |
+| POST | `/api/operations/execute` | Yes (X-API-Key) | Execute Existing Approved Operation |
 | GET | `/api/operations` | Yes (X-API-Key) | List Operations |
 | GET | `/api/operations/{operation_id}` | Yes (X-API-Key) | Get Operation |
 | POST | `/api/operations/{operation_id}/approve` | Yes (X-API-Key) | Approve Operation |
@@ -653,10 +653,11 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 
 #### POST /api/operations/execute
 
-- **Summary:** Create And Execute Operation — resolve an idempotent operation and execute it only if it was previously approved
+- **Summary:** Execute Existing Approved Operation — resolve an idempotent operation and execute it only if it already exists and has passed artist approval and final readiness
 - **Auth:** Yes (X-API-Key)
 - **Request body:** same as `POST /api/operations`
 - **Response:** 200 — `{ operation, created }`
+- **Failures:** 409 when the idempotency key creates a new operation, or when the existing operation has not been approved and marked ready; use `POST /api/operations`, then the explicit approval and readiness endpoints
 
 #### GET /api/operations/{operation_id}
 
