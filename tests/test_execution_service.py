@@ -98,6 +98,37 @@ def test_operation_history_is_artist_scoped_bounded_and_filterable(services):
     with pytest.raises(HTTPException) as exc:
         svc._list_operations("artist-1", limit=101)
     assert exc.value.status_code == 422
+
+
+def test_operation_history_route_is_scoped_and_exposes_bounded_contract(services, monkeypatch):
+    svc, _, _, _ = services
+    owned, _ = svc._create_or_get_operation(**_gmail_request(key="route-owned"))
+    other_request = _gmail_request(key="route-other")
+    other_request["artist_id"] = "artist-2"
+    other, _ = svc._create_or_get_operation(**other_request)
+
+    def scoped_artist(_request, claimed_artist_id):
+        if claimed_artist_id != "artist-1":
+            from artist_identity import ArtistAuthError
+            raise ArtistAuthError("Artist resource not found")
+        return claimed_artist_id
+
+    monkeypatch.setattr(svc, "require_artist_scope", scoped_artist)
+    response = svc.list_operations("artist-1", limit=50, request=object())
+    assert [item["id"] for item in response["operations"]] == [owned["id"]]
+    assert response["limit"] == 50
+
+    with pytest.raises(HTTPException) as exc:
+        svc.list_operations("artist-1", limit=101, request=object())
+    assert exc.value.status_code == 422
+
+    with pytest.raises(HTTPException) as exc:
+        svc.list_operations("artist-1", limit=50, status="not-a-status", request=object())
+    assert exc.value.status_code == 422
+
+    with pytest.raises(HTTPException) as exc:
+        svc.get_operation(other["id"], "artist-1", request=object())
+    assert exc.value.status_code == 404
     with pytest.raises(HTTPException) as exc:
         svc._list_operations("artist-1", status="not-a-status")
     assert exc.value.status_code == 422

@@ -24,7 +24,7 @@ from email.utils import make_msgid, parseaddr
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 import pitch_service
@@ -755,7 +755,7 @@ class OperationRequest(BaseModel):
 @router.get("/api/operations", tags=["operations"])
 def list_operations(
     artist_id: str,
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=100),
     status: Optional[str] = None,
     request: Request = None,
 ):
