@@ -17,11 +17,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Model is cached to /root/.cache/whisper/ inside this image layer.
 RUN python -c "import whisper; whisper.load_model('base')"
 
-# Copy application code and static assets
-COPY main.py anthropic_utils.py .
-COPY pitch_service.py pr_service.py booking_service.py \
-     social_service.py release_service.py admin_service.py \
-     prompt_safety.py seed_curators.py seed_pr_contacts.py seed_booking_contacts.py ./
+# Copy all application modules and runtime assets.
+# Keeping the complete top-level Python module set prevents newly added
+# services from passing local tests but being omitted from the container.
+COPY *.py ./
+COPY knowledge_bank/ ./knowledge_bank/
 COPY static/ ./static/
 COPY skills/ ./skills/
 COPY data/ ./data/
