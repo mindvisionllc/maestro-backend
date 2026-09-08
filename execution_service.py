@@ -482,6 +482,15 @@ async def execute_operation(operation_id: str, artist_id: Optional[str] = None) 
                 payload["body"],
                 message_id_header=operation["correlation_key"],
             )
+            if not isinstance(result, dict) or not result.get("message_id"):
+                return _finish(
+                    operation_id,
+                    "unknown",
+                    provider_result=result if isinstance(result, dict) else {"raw_result": str(result)},
+                    error_code="provider_reference_missing",
+                    error_detail="Gmail returned no message ID; reconciliation is required before any retry.",
+                    expected_status="executing",
+                )
             return _finish(
                 operation_id,
                 "succeeded",
@@ -548,6 +557,15 @@ async def execute_operation(operation_id: str, artist_id: Optional[str] = None) 
             media_url=post.get("media_url", ""),
             scheduled_at=post.get("scheduled_at"),
         )
+        if not isinstance(result, dict) or not result.get("id"):
+            return _finish(
+                operation_id,
+                "unknown",
+                provider_result=result if isinstance(result, dict) else {"raw_result": str(result)},
+                error_code="provider_reference_missing",
+                error_detail="Buffer returned no update ID; reconciliation is required before any retry.",
+                expected_status="executing",
+            )
         provider_reference = result.get("id")
         social_service._db_update_post(
             post["id"],

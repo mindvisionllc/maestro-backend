@@ -639,6 +639,7 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 - **Query params:** `artist_id` (string, required)
 - **Response:** 200 — durable operation object
 - **Failures:** 409 when the operation has not been approved
+- **Safety:** A provider response without a stable provider reference is recorded as `unknown` and requires reconciliation; it is never treated as a successful completion or automatically retried
 
 #### POST /api/operations/execute
 

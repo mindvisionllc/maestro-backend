@@ -166,6 +166,24 @@ def test_unknown_gmail_outcome_reconciles_by_message_id(services, monkeypatch):
     assert reconciled["reconciled_at"]
 
 
+def test_gmail_result_without_message_id_is_unknown_and_not_retryable(services, monkeypatch):
+    svc, pitch, _, _ = services
+
+    async def missing_reference(*args, **kwargs):
+        return {"status": "sent"}
+
+    monkeypatch.setattr(pitch, "send_email", missing_reference)
+    operation, _ = svc._create_or_get_operation(**_gmail_request(key="gmail-missing-reference"))
+    _approve(svc, operation)
+
+    result = asyncio.run(svc.execute_operation(operation["id"]))
+
+    assert result["status"] == "unknown"
+    assert result["reconciliation_required"] is True
+    assert result["error_code"] == "provider_reference_missing"
+    assert result["provider_result"] == {"status": "sent"}
+
+
 def test_startup_moves_interrupted_execution_to_unknown(services):
     svc, _, _, db = services
     operation, _ = svc._create_or_get_operation(**_gmail_request())
@@ -219,6 +237,37 @@ def test_single_social_post_success_updates_post_and_records_buffer_result(servi
     assert social._db_get_post("post-1")["buffer_update_id"] == "buffer-1"
     assert len(calls) == 1
     discovery.assert_not_called()
+
+
+def test_social_result_without_update_id_is_unknown_and_blocks_retry(services, monkeypatch):
+    svc, _, social, _ = services
+    social._db_create_post({
+        "id": "post-missing-reference",
+        "artist_id": "artist-1",
+        "platform": "instagram",
+        "content": "Potentially scheduled",
+        "status": "draft",
+    })
+
+    async def missing_reference(*args, **kwargs):
+        return {"status": "buffer_queued"}
+
+    monkeypatch.setattr(social, "_buffer_schedule_post", missing_reference)
+    operation, _ = svc._create_or_get_operation(
+        artist_id="artist-1",
+        action_type="social.buffer.schedule",
+        idempotency_key="social-missing-reference",
+        payload={"post_id": "post-missing-reference", "buffer_profile_ids": ["profile-1"]},
+    )
+    _approve(svc, operation)
+
+    result = asyncio.run(svc.execute_operation(operation["id"]))
+
+    assert result["status"] == "unknown"
+    assert result["reconciliation_required"] is True
+    assert result["error_code"] == "provider_reference_missing"
+    assert result["provider_result"] == {"status": "buffer_queued"}
+    assert social._db_get_post("post-missing-reference")["status"] == "scheduling"
 
 
 def test_social_post_can_only_be_bound_to_one_operation(services):
