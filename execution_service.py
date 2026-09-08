@@ -89,6 +89,22 @@ def init_execution_db():
         "CREATE INDEX IF NOT EXISTS idx_execution_operations_status "
         "ON execution_operations (status, updated_at)"
     )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS execution_operation_events (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            operation_id   TEXT NOT NULL,
+            artist_id      TEXT NOT NULL,
+            event_type     TEXT NOT NULL,
+            from_status    TEXT,
+            to_status      TEXT NOT NULL,
+            metadata       TEXT,
+            occurred_at    TEXT NOT NULL
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_execution_operation_events "
+        "ON execution_operation_events (operation_id, id)"
+    )
     existing_cols = {
         row[1] for row in conn.execute("PRAGMA table_info(execution_operations)").fetchall()
     }
@@ -107,6 +123,9 @@ def init_execution_db():
     )
     # Never blindly retry a provider call after process loss: the provider may
     # have accepted it before the response or local commit was lost.
+    interrupted_operations = conn.execute(
+        "SELECT id, artist_id FROM execution_operations WHERE status='executing'"
+    ).fetchall()
     conn.execute(
         """UPDATE execution_operations
            SET status='unknown',
@@ -118,6 +137,14 @@ def init_execution_db():
     )
     conn.commit()
     conn.close()
+    for operation_id, artist_id in interrupted_operations:
+        _record_operation_event(
+            operation_id,
+            artist_id,
+            "process_interrupted",
+            "unknown",
+            from_status="executing",
+        )
     log.info("db_ready", extra={"event": "db_ready", "svc": "execution_service"})
 
 
@@ -142,7 +169,57 @@ def _row_to_operation(row) -> dict:
         else:
             operation[key] = None if key in ("provider_result", "profile_binding") else {}
     operation["reconciliation_required"] = operation["status"] in RECONCILABLE_STATUSES
+    operation["events"] = _list_operation_events(operation["id"], operation["artist_id"])
     return operation
+
+
+def _list_operation_events(operation_id: str, artist_id: str) -> list[dict]:
+    conn = sqlite3.connect(str(_DB_PATH))
+    rows = conn.execute(
+        """SELECT event_type, from_status, to_status, metadata, occurred_at
+           FROM execution_operation_events
+           WHERE operation_id=? AND artist_id=?
+           ORDER BY id ASC""",
+        (operation_id, artist_id),
+    ).fetchall()
+    conn.close()
+    events = []
+    for event_type, from_status, to_status, metadata, occurred_at in rows:
+        try:
+            parsed_metadata = json.loads(metadata) if metadata else {}
+        except json.JSONDecodeError:
+            parsed_metadata = {}
+        events.append({
+            "event_type": event_type,
+            "from_status": from_status,
+            "to_status": to_status,
+            "metadata": parsed_metadata,
+            "occurred_at": occurred_at,
+        })
+    return events
+
+
+def _record_operation_event(
+    operation_id: str,
+    artist_id: str,
+    event_type: str,
+    to_status: str,
+    *,
+    from_status: Optional[str] = None,
+    metadata: Optional[dict] = None,
+):
+    conn = sqlite3.connect(str(_DB_PATH))
+    conn.execute(
+        """INSERT INTO execution_operation_events
+           (operation_id, artist_id, event_type, from_status, to_status, metadata, occurred_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (
+            operation_id, artist_id, event_type, from_status, to_status,
+            json.dumps(metadata or {}, sort_keys=True, separators=(",", ":")), _now(),
+        ),
+    )
+    conn.commit()
+    conn.close()
 
 
 def _get_operation(operation_id: str) -> dict:
@@ -325,6 +402,8 @@ def _create_or_get_operation(
                 },
             )
         return existing, False
+    operation = _get_operation(operation_id)
+    _record_operation_event(operation_id, operation["artist_id"], "created", operation["status"])
     return _get_operation(operation_id), True
 
 
@@ -372,7 +451,16 @@ def _claim_pending(operation_id: str) -> tuple[dict, bool]:
             (timestamp, timestamp, operation_id),
         )
         conn.commit()
-        return _get_operation(operation_id), True
+        claimed_operation = _get_operation(operation_id)
+        _record_operation_event(
+            operation_id,
+            claimed_operation["artist_id"],
+            "dispatch_started",
+            claimed_operation["status"],
+            from_status=operation["status"],
+            metadata={"attempt_count": claimed_operation["attempt_count"]},
+        )
+        return claimed_operation, True
     finally:
         conn.close()
 
@@ -407,7 +495,7 @@ def _finish(
     if expected_status:
         where += " AND status=?"
         params.append(expected_status)
-    conn.execute(
+    cursor = conn.execute(
         """UPDATE execution_operations
            SET status=?, provider_result=?, provider_reference=?,
                error_code=?, error_detail=?, updated_at=?,
@@ -418,6 +506,21 @@ def _finish(
     )
     conn.commit()
     conn.close()
+    operation = _get_operation(operation_id)
+    if cursor.rowcount == 1:
+        _record_operation_event(
+            operation_id,
+            operation["artist_id"],
+            "reconciled" if reconciled else "dispatch_finished",
+            operation["status"],
+            from_status=expected_status or "executing",
+            metadata={
+                key: value for key, value in {
+                    "error_code": error_code,
+                    "provider_reference": provider_reference,
+                }.items() if value is not None
+            },
+        )
     return _get_operation(operation_id)
 
 
@@ -469,7 +572,7 @@ def approve_operation(operation_id: str, artist_id: Optional[str] = None) -> dic
         )
     timestamp = _now()
     conn = sqlite3.connect(str(_DB_PATH))
-    conn.execute(
+    cursor = conn.execute(
         """UPDATE execution_operations
            SET approved_at=COALESCE(approved_at, ?), updated_at=?
            WHERE id=? AND status IN ('pending','failed_retryable')""",
@@ -477,6 +580,11 @@ def approve_operation(operation_id: str, artist_id: Optional[str] = None) -> dic
     )
     conn.commit()
     conn.close()
+    updated = _get_operation(operation_id)
+    if cursor.rowcount == 1 and not operation["approved_at"]:
+        _record_operation_event(
+            operation_id, updated["artist_id"], "artist_approved", updated["status"]
+        )
     return _get_operation(operation_id)
 
 
@@ -502,7 +610,7 @@ def mark_operation_ready(operation_id: str, artist_id: Optional[str] = None) -> 
         )
     timestamp = _now()
     conn = sqlite3.connect(str(_DB_PATH))
-    conn.execute(
+    cursor = conn.execute(
         """UPDATE execution_operations
            SET ready_at=COALESCE(ready_at, ?), updated_at=?
            WHERE id=? AND status IN ('pending','failed_retryable')""",
@@ -510,6 +618,11 @@ def mark_operation_ready(operation_id: str, artist_id: Optional[str] = None) -> 
     )
     conn.commit()
     conn.close()
+    updated = _get_operation(operation_id)
+    if cursor.rowcount == 1 and not operation["ready_at"]:
+        _record_operation_event(
+            operation_id, updated["artist_id"], "execution_ready", updated["status"]
+        )
     return _get_operation(operation_id)
 
 

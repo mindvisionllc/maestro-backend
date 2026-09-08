@@ -67,6 +67,43 @@ def test_create_is_idempotent_and_conflicting_payload_is_rejected(services):
     assert exc.value.detail["code"] == "idempotency_conflict"
 
 
+def test_operation_events_preserve_artist_approval_and_dispatch_history(services, monkeypatch):
+    svc, pitch, _, _ = services
+
+    async def fake_send(*args, **kwargs):
+        return {"message_id": "event-msg", "status": "sent"}
+
+    monkeypatch.setattr(pitch, "send_email", fake_send)
+    operation, _ = svc._create_or_get_operation(**_gmail_request(key="event-history"))
+    approved = svc.approve_operation(operation["id"], artist_id=operation["artist_id"])
+    ready = svc.mark_operation_ready(approved["id"], artist_id=operation["artist_id"])
+    result = asyncio.run(svc.execute_operation(ready["id"], artist_id=operation["artist_id"]))
+
+    assert [event["event_type"] for event in result["events"]] == [
+        "created",
+        "artist_approved",
+        "execution_ready",
+        "dispatch_started",
+        "dispatch_finished",
+    ]
+    assert result["events"][3]["from_status"] == "pending"
+    assert result["events"][3]["to_status"] == "executing"
+    assert result["events"][-1]["to_status"] == "succeeded"
+    assert result["events"][-1]["metadata"]["provider_reference"] == "event-msg"
+
+
+def test_operation_events_are_artist_scoped(services):
+    svc, _, _, _ = services
+    operation, _ = svc._create_or_get_operation(**_gmail_request(key="event-scope"))
+    other_request = _gmail_request(key="event-scope-other")
+    other_request["artist_id"] = "artist-2"
+    other, _ = svc._create_or_get_operation(**other_request)
+
+    assert operation["events"][0]["event_type"] == "created"
+    assert other["events"][0]["event_type"] == "created"
+    assert svc._list_operation_events(operation["id"], "artist-2") == []
+
+
 def test_operation_history_is_artist_scoped_bounded_and_filterable(services):
     svc, _, _, _ = services
     first, _ = svc._create_or_get_operation(**_gmail_request(key="history-old"))
@@ -232,6 +269,8 @@ def test_startup_moves_interrupted_execution_to_unknown(services):
     recovered = svc._get_operation(operation["id"])
     assert recovered["status"] == "unknown"
     assert recovered["error_code"] == "process_interrupted"
+    assert recovered["events"][-1]["event_type"] == "process_interrupted"
+    assert recovered["events"][-1]["from_status"] == "executing"
 
 
 def test_single_social_post_success_updates_post_and_records_buffer_result(services, monkeypatch):
