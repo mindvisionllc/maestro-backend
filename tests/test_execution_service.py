@@ -1169,3 +1169,43 @@ def test_live_buffer_auth_expiry_is_retryable_and_leaves_social_draft_intact(ser
     assert "reconnect Buffer" in failed["error_detail"]
     assert social._db_get_post("post-auth-expired")["status"] == "draft"
     schedule.assert_not_called()
+
+def test_buffer_schedule_auth_expiry_is_retryable_and_restores_social_draft(services, monkeypatch):
+    svc, _, social, _ = services
+    social._db_create_post({
+        "id": "post-schedule-auth-expired",
+        "artist_id": "artist-1",
+        "platform": "instagram",
+        "content": "Retry after reconnect",
+        "status": "draft",
+    })
+
+    async def available_profiles(artist_id):
+        return [{"id": "profile-1", "service": "instagram"}]
+
+    async def expired_schedule(*args, **kwargs):
+        raise social.BufferAuthExpired(
+            "Buffer authorization expired; reconnect Buffer before continuing"
+        )
+
+    monkeypatch.setattr(social, "_BUFFER_LIVE", True)
+    monkeypatch.setattr(social, "_buffer_list_profiles", available_profiles)
+    monkeypatch.setattr(social, "_buffer_schedule_post", expired_schedule)
+
+    operation, _ = svc._create_or_get_operation(
+        artist_id="artist-1",
+        action_type="social.buffer.schedule",
+        idempotency_key="schedule-auth-expired",
+        payload={
+            "post_id": "post-schedule-auth-expired",
+            "platform": "instagram",
+            "buffer_profile_ids": ["profile-1"],
+        },
+    )
+    _approve(svc, operation)
+
+    failed = asyncio.run(svc.execute_operation(operation["id"]))
+
+    assert failed["status"] == "failed_retryable"
+    assert failed["error_code"] == "BufferAuthExpired"
+    assert social._db_get_post("post-schedule-auth-expired")["status"] == "draft"

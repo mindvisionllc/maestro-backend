@@ -671,6 +671,15 @@ async def _buffer_post_real(
             })
             raise RuntimeError("Buffer API rate limit exceeded after retries")
 
+        if resp.status_code in (401, 403):
+            log.warning("buffer_post_auth_expired", extra={
+                "event": "buffer_post_auth_expired",
+                "status": resp.status_code,
+            })
+            raise BufferAuthExpired(
+                "Buffer authorization expired; reconnect Buffer before continuing"
+            )
+
         if resp.status_code != 200:
             log.error("buffer_post_error", extra={
                 "event": "buffer_post_error", "status": resp.status_code, "body": resp.text[:200],

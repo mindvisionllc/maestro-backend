@@ -1050,7 +1050,7 @@ async def execute_operation(operation_id: str, artist_id: Optional[str] = None) 
             error_detail=str(exc),
             expected_status="executing",
         )
-    except social_service.BufferNotConnected as exc:
+    except (social_service.BufferNotConnected, social_service.BufferAuthExpired) as exc:
         return _finish(
             operation_id,
             "failed_retryable",

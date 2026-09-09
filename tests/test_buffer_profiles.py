@@ -198,3 +198,16 @@ def test_buffer_list_profiles_maps_transport_failure_to_runtime_error(monkeypatc
     with patch("social_service.httpx.AsyncClient", return_value=cm):
         with pytest.raises(RuntimeError, match="temporarily unavailable"):
             asyncio.run(svc._buffer_list_profiles("artist-1"))
+
+@pytest.mark.parametrize("status_code", [401, 403])
+def test_buffer_post_classifies_expired_authorization(monkeypatch, status_code):
+    resp = _mock_response(status_code, {}, "authorization rejected")
+    client = MagicMock()
+    client.post = AsyncMock(return_value=resp)
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=client)
+    cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("social_service.httpx.AsyncClient", return_value=cm):
+        with pytest.raises(svc.BufferAuthExpired, match="reconnect Buffer"):
+            asyncio.run(svc._buffer_post_real("token-123", "Post", ["profile-1"]))
