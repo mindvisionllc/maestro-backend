@@ -49,6 +49,15 @@ MAX_SOCIAL_ID_LENGTH = 256
 MAX_BUFFER_PROFILES = 20
 MAX_OPERATION_PAYLOAD_BYTES = 512 * 1024
 
+SUPPORTED_SOCIAL_PLATFORMS = {
+    "facebook": "facebook",
+    "instagram": "instagram",
+    "tiktok": "tiktok",
+    "twitter": "twitter",
+    "x": "x",
+    "youtube": "youtube",
+}
+
 TERMINAL_STATUSES = {"succeeded", "failed", "canceled"}
 EXECUTABLE_STATUSES = {"pending", "failed_retryable"}
 RECONCILABLE_STATUSES = {"unknown"}
@@ -345,6 +354,21 @@ def _require_bounded_string(value, field: str, maximum: int) -> str:
     return normalized
 
 
+def _normalize_social_platform(value, field: str = "platform") -> str:
+    platform = _require_bounded_string(value, field, MAX_IDENTIFIER_LENGTH).lower()
+    normalized = SUPPORTED_SOCIAL_PLATFORMS.get(platform)
+    if not normalized:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "unsupported_social_platform",
+                "field": field,
+                "platform": platform,
+            },
+        )
+    return normalized
+
+
 def _validate_payload(action_type: str, payload: dict) -> dict:
     if action_type not in SUPPORTED_ACTIONS:
         raise HTTPException(
@@ -378,6 +402,8 @@ def _validate_payload(action_type: str, payload: dict) -> dict:
         normalized["post_id"] = _require_bounded_string(
             payload.get("post_id"), "post_id", MAX_SOCIAL_ID_LENGTH,
         )
+        if "platform" in payload:
+            normalized["platform"] = _normalize_social_platform(payload["platform"])
         profiles = payload.get("buffer_profile_ids")
         if (
             not isinstance(profiles, list)
@@ -918,6 +944,16 @@ async def execute_operation(operation_id: str, artist_id: Optional[str] = None) 
                 error_detail="The operation payload no longer matches its durable Buffer profile binding.",
                 expected_status="executing",
             )
+        requested_platform = payload.get("platform")
+        post_platform = str(post.get("platform") or "").strip().lower()
+        if requested_platform and requested_platform != post_platform:
+            return _finish(
+                operation_id,
+                "failed",
+                error_code="social_platform_mismatch",
+                error_detail="The approved platform no longer matches the durable social post.",
+                expected_status="executing",
+            )
         # Mock/local execution must never make a live Buffer request. In live
         # mode, fail closed by revalidating the immutable profile binding
         # immediately before the write-capable provider call.
@@ -944,6 +980,26 @@ async def execute_operation(operation_id: str, artist_id: Optional[str] = None) 
                     error_detail=f"Selected Buffer profiles are unavailable: {', '.join(invalid_profile_ids)}",
                     expected_status="executing",
                 )
+            binding_platform = requested_platform or post_platform
+            if binding_platform:
+                mismatched_profile_ids = sorted(
+                    profile.get("id")
+                    for profile in profiles
+                    if isinstance(profile, dict)
+                    and profile.get("id") in operation["profile_binding"]
+                    and str(profile.get("service") or "").strip().lower() != binding_platform
+                )
+                if mismatched_profile_ids:
+                    return _finish(
+                        operation_id,
+                        "failed",
+                        error_code="buffer_profile_platform_mismatch",
+                        error_detail=(
+                            "Selected Buffer profiles do not match the approved social platform: "
+                            + ", ".join(mismatched_profile_ids)
+                        ),
+                        expected_status="executing",
+                    )
         if not _claim_social_post(operation):
             return _finish(
                 operation_id,

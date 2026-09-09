@@ -115,10 +115,28 @@ def test_social_operation_limits_duplicate_and_excessive_profile_ids(services):
         artist_id="artist-1",
         action_type=svc.SOCIAL_SCHEDULE,
         idempotency_key="social-dedup-profiles",
-        payload={"post_id": "post-1", "buffer_profile_ids": ["profile-2", "profile-1", "profile-1"]},
+        payload={
+            "post_id": "post-1",
+            "platform": "Instagram",
+            "buffer_profile_ids": ["profile-2", "profile-1", "profile-1"],
+        },
     )
     assert created is True
     assert operation["profile_binding"] == ["profile-1", "profile-2"]
+    assert operation["payload"]["platform"] == "instagram"
+
+    with pytest.raises(HTTPException) as exc:
+        svc._create_or_get_operation(
+            artist_id="artist-1",
+            action_type=svc.SOCIAL_SCHEDULE,
+            idempotency_key="social-unsupported-platform",
+            payload={
+                "post_id": "post-2",
+                "platform": "mastodon",
+                "buffer_profile_ids": ["profile-1"],
+            },
+        )
+    assert exc.value.detail["code"] == "unsupported_social_platform"
 
 
 def test_idempotency_lookup_recovers_operation_without_history_scan(services):
@@ -700,6 +718,69 @@ def test_single_social_post_success_updates_post_and_records_buffer_result(servi
     assert social._db_get_post("post-1")["buffer_update_id"] == "buffer-1"
     assert len(calls) == 1
     discovery.assert_not_called()
+
+
+def test_social_platform_binding_fails_closed_before_provider_dispatch(services, monkeypatch):
+    svc, _, social, _ = services
+    social._db_create_post({
+        "id": "post-platform-mismatch",
+        "artist_id": "artist-1",
+        "platform": "instagram",
+        "content": "Instagram-only draft",
+        "status": "draft",
+    })
+    schedule = AsyncMock()
+    monkeypatch.setattr(social, "_buffer_schedule_post", schedule)
+    operation, _ = svc._create_or_get_operation(
+        artist_id="artist-1",
+        action_type="social.buffer.schedule",
+        idempotency_key="platform-mismatch",
+        payload={
+            "post_id": "post-platform-mismatch",
+            "platform": "Twitter",
+            "buffer_profile_ids": ["profile-2"],
+        },
+    )
+    _approve(svc, operation)
+
+    result = asyncio.run(svc.execute_operation(operation["id"]))
+
+    assert result["status"] == "failed"
+    assert result["error_code"] == "social_platform_mismatch"
+    assert social._db_get_post("post-platform-mismatch")["status"] == "draft"
+    schedule.assert_not_awaited()
+
+
+def test_live_social_execution_requires_selected_profiles_to_match_platform(services, monkeypatch):
+    svc, _, social, _ = services
+    social._db_create_post({
+        "id": "post-profile-platform-mismatch",
+        "artist_id": "artist-1",
+        "platform": "instagram",
+        "content": "Profile must match platform",
+        "status": "draft",
+    })
+    monkeypatch.setattr(social, "_BUFFER_LIVE", True)
+    schedule = AsyncMock(return_value={"id": "must-not-send"})
+    monkeypatch.setattr(social, "_buffer_schedule_post", schedule)
+    operation, _ = svc._create_or_get_operation(
+        artist_id="artist-1",
+        action_type="social.buffer.schedule",
+        idempotency_key="profile-platform-mismatch",
+        payload={
+            "post_id": "post-profile-platform-mismatch",
+            "platform": "instagram",
+            "buffer_profile_ids": ["profile-2"],
+        },
+    )
+    _approve(svc, operation)
+
+    result = asyncio.run(svc.execute_operation(operation["id"]))
+
+    assert result["status"] == "failed"
+    assert result["error_code"] == "buffer_profile_platform_mismatch"
+    assert social._db_get_post("post-profile-platform-mismatch")["status"] == "draft"
+    schedule.assert_not_awaited()
 
 
 def test_social_result_without_update_id_is_unknown_and_blocks_retry(services, monkeypatch):
