@@ -693,6 +693,9 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 - **Path params:** `operation_id` (string, required)
 - **Query params:** `artist_id` (string, required)
 - **Response:** 200 — updated durable operation object
+- **History:** A completed lookup is recorded as `reconciled`; an unavailable or
+  failed lookup is recorded as `reconciliation_failed` and remains explicitly
+  reconcilable for a later safe attempt.
 
 ---
 

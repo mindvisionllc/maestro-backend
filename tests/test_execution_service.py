@@ -540,6 +540,8 @@ def test_failed_gmail_reconciliation_remains_required_for_safe_retry(
     assert failed["error_code"] == error_code
     assert failed["reconciliation_required"] is True
     assert failed["reconciled_at"] is None
+    assert failed["events"][-1]["event_type"] == "reconciliation_failed"
+    assert failed["events"][-1]["from_status"] == "unknown"
 
 
 def test_unknown_outcome_records_attempt_completion_without_collapsing_reconciliation_time(

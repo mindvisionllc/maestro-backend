@@ -570,11 +570,18 @@ def _finish(
             "SELECT artist_id FROM execution_operations WHERE id=?",
             (operation_id,),
         ).fetchone()
+        event_type = (
+            "reconciled"
+            if reconciled
+            else "reconciliation_failed"
+            if expected_status == "unknown"
+            else "dispatch_finished"
+        )
         _insert_operation_event(
             conn,
             operation_id,
             artist_row[0],
-            "reconciled" if reconciled else "dispatch_finished",
+            event_type,
             status,
             from_status=expected_status or "executing",
             metadata={
