@@ -595,6 +595,7 @@ def _finish(
     expected_status: Optional[str] = None,
     social_post_id: Optional[str] = None,
     social_post_reference: Optional[str] = None,
+    restore_social_post_id: Optional[str] = None,
 ) -> dict:
     timestamp = _now()
     # An ambiguous provider response still ends the dispatch attempt. Keep
@@ -616,6 +617,16 @@ def _finish(
             if post_cursor.rowcount != 1:
                 raise RuntimeError(
                     "The social post could not be durably marked scheduled; reconciliation is required."
+                )
+        if restore_social_post_id is not None:
+            post_cursor = conn.execute(
+                """UPDATE social_posts SET status='draft'
+                   WHERE id=? AND status='scheduling'""",
+                (restore_social_post_id,),
+            )
+            if post_cursor.rowcount != 1:
+                raise RuntimeError(
+                    "The social post could not be durably restored after the provider was unavailable."
                 )
         where = "WHERE id=?"
         params = [
@@ -695,17 +706,6 @@ def _claim_social_post(operation: dict) -> bool:
         return cur.rowcount == 1
     finally:
         conn.close()
-
-
-def _restore_social_post(operation: dict):
-    conn = sqlite3.connect(str(_DB_PATH))
-    conn.execute(
-        """UPDATE social_posts SET status='draft'
-           WHERE id=? AND artist_id=? AND status='scheduling'""",
-        (operation["payload"]["post_id"], operation["artist_id"]),
-    )
-    conn.commit()
-    conn.close()
 
 
 def _require_operation_owner(operation: dict, artist_id: Optional[str]):
@@ -1043,14 +1043,16 @@ async def execute_operation(operation_id: str, artist_id: Optional[str] = None) 
             expected_status="executing",
         )
     except social_service.BufferNotConnected as exc:
-        if operation["action_type"] == SOCIAL_SCHEDULE:
-            _restore_social_post(operation)
         return _finish(
             operation_id,
             "failed_retryable",
             error_code=type(exc).__name__,
             error_detail=str(exc),
             expected_status="executing",
+            restore_social_post_id=(
+                operation["payload"]["post_id"]
+                if operation["action_type"] == SOCIAL_SCHEDULE else None
+            ),
         )
     except Exception as exc:
         log.error(

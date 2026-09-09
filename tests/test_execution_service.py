@@ -1001,6 +1001,45 @@ def test_buffer_not_connected_can_retry_same_operation_safely(services, monkeypa
     assert attempts["count"] == 2
 
 
+def test_buffer_restore_and_retryable_history_are_atomic(services, monkeypatch):
+    svc, _, social, _ = services
+    social._db_create_post({
+        "id": "post-atomic-retry",
+        "artist_id": "artist-1",
+        "platform": "instagram",
+        "content": "Atomic retry recovery",
+        "status": "draft",
+    })
+
+    async def unavailable(*args, **kwargs):
+        raise social.BufferNotConnected("not connected")
+
+    monkeypatch.setattr(social, "_buffer_schedule_post", unavailable)
+    operation, _ = svc._create_or_get_operation(
+        artist_id="artist-1",
+        action_type="social.buffer.schedule",
+        idempotency_key="atomic-retryable-social",
+        payload={"post_id": "post-atomic-retry", "buffer_profile_ids": ["profile-1"]},
+    )
+    _approve(svc, operation)
+
+    original = svc._insert_operation_event
+
+    def fail_history(*args, **kwargs):
+        if len(args) >= 4 and args[3] == "dispatch_finished":
+            raise sqlite3.OperationalError("history unavailable")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(svc, "_insert_operation_event", fail_history)
+    with pytest.raises(sqlite3.OperationalError):
+        asyncio.run(svc.execute_operation(operation["id"]))
+
+    current = svc._get_operation(operation["id"])
+    assert current["status"] == "executing"
+    assert social._db_get_post("post-atomic-retry")["status"] == "scheduling"
+    monkeypatch.setattr(svc, "_insert_operation_event", original)
+
+
 def test_unapproved_operation_never_calls_provider(services, monkeypatch):
     svc, pitch, _, _ = services
     send = MagicMock()
