@@ -499,53 +499,60 @@ def _finish(
 ) -> dict:
     timestamp = _now()
     conn = sqlite3.connect(str(_DB_PATH))
-    where = "WHERE id=?"
-    params = [
-        status,
-        json.dumps(provider_result) if provider_result is not None else None,
-        provider_reference,
-        error_code,
-        error_detail,
-        timestamp,
-        status,
-        timestamp,
-        1 if reconciled else 0,
-        timestamp,
-        operation_id,
-    ]
-    if expected_status:
-        where += " AND status=?"
-        params.append(expected_status)
-    cursor = conn.execute(
-        """UPDATE execution_operations
-           SET status=?, provider_result=?, provider_reference=?,
-               error_code=?, error_detail=?, updated_at=?,
-                completed_at=CASE WHEN ? IN ('succeeded','failed') THEN ? ELSE completed_at END,
-               reconciled_at=CASE WHEN ? THEN ? ELSE reconciled_at END
-        """ + where,
-        params,
-    )
-    if cursor.rowcount == 1:
-        artist_row = conn.execute(
-            "SELECT artist_id FROM execution_operations WHERE id=?",
-            (operation_id,),
-        ).fetchone()
-        _insert_operation_event(
-            conn,
-            operation_id,
-            artist_row[0],
-            "reconciled" if reconciled else "dispatch_finished",
+    try:
+        # Publish the authoritative status and its audit event atomically.
+        conn.execute("BEGIN IMMEDIATE")
+        where = "WHERE id=?"
+        params = [
             status,
-            from_status=expected_status or "executing",
-            metadata={
-                key: value for key, value in {
-                    "error_code": error_code,
-                    "provider_reference": provider_reference,
-                }.items() if value is not None
-            },
+            json.dumps(provider_result) if provider_result is not None else None,
+            provider_reference,
+            error_code,
+            error_detail,
+            timestamp,
+            status,
+            timestamp,
+            1 if reconciled else 0,
+            timestamp,
+            operation_id,
+        ]
+        if expected_status:
+            where += " AND status=?"
+            params.append(expected_status)
+        cursor = conn.execute(
+            """UPDATE execution_operations
+               SET status=?, provider_result=?, provider_reference=?,
+                   error_code=?, error_detail=?, updated_at=?,
+                    completed_at=CASE WHEN ? IN ('succeeded','failed') THEN ? ELSE completed_at END,
+                   reconciled_at=CASE WHEN ? THEN ? ELSE reconciled_at END
+            """ + where,
+            params,
         )
-    conn.commit()
-    conn.close()
+        if cursor.rowcount == 1:
+            artist_row = conn.execute(
+                "SELECT artist_id FROM execution_operations WHERE id=?",
+                (operation_id,),
+            ).fetchone()
+            _insert_operation_event(
+                conn,
+                operation_id,
+                artist_row[0],
+                "reconciled" if reconciled else "dispatch_finished",
+                status,
+                from_status=expected_status or "executing",
+                metadata={
+                    key: value for key, value in {
+                        "error_code": error_code,
+                        "provider_reference": provider_reference,
+                    }.items() if value is not None
+                },
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     return _get_operation(operation_id)
 
 

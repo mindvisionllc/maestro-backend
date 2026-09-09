@@ -145,6 +145,44 @@ def test_readiness_rolls_back_when_history_event_cannot_be_recorded(services, mo
     assert [event["event_type"] for event in current["events"]] == ["created", "artist_approved"]
 
 
+@pytest.mark.parametrize("reconciled, initial_status, final_status", [
+    (False, "executing", "succeeded"),
+    (True, "unknown", "unknown"),
+])
+def test_finish_rolls_back_status_when_history_event_cannot_be_recorded(
+    services, monkeypatch, reconciled, initial_status, final_status,
+):
+    svc, _, _, db = services
+    operation, _ = svc._create_or_get_operation(
+        **_gmail_request(key=f"atomic-finish-{reconciled}")
+    )
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "UPDATE execution_operations SET status=? WHERE id=?",
+        (initial_status, operation["id"]),
+    )
+    conn.commit()
+    conn.close()
+
+    def fail_history(*args, **kwargs):
+        raise sqlite3.OperationalError("history unavailable")
+
+    monkeypatch.setattr(svc, "_insert_operation_event", fail_history)
+    with pytest.raises(sqlite3.OperationalError):
+        svc._finish(
+            operation["id"],
+            final_status,
+            provider_reference="provider-id" if not reconciled else None,
+            reconciled=reconciled,
+            expected_status=initial_status,
+        )
+
+    current = svc._get_operation(operation["id"])
+    assert current["status"] == initial_status
+    assert current["provider_reference"] is None
+    assert [event["event_type"] for event in current["events"]] == ["created"]
+
+
 def test_approval_and_readiness_are_idempotent_without_duplicate_events(services):
     svc, _, _, _ = services
     operation, _ = svc._create_or_get_operation(**_gmail_request(key="idempotent-gates"))
