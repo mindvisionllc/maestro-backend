@@ -500,6 +500,31 @@ def test_unknown_gmail_outcome_reconciles_by_message_id(services, monkeypatch):
     assert reconciled["reconciled_at"]
 
 
+def test_unknown_outcome_records_attempt_completion_without_collapsing_reconciliation_time(
+    services, monkeypatch,
+):
+    svc, pitch, _, _ = services
+
+    async def timed_out(*args, **kwargs):
+        raise TimeoutError("response lost")
+
+    monkeypatch.setattr(pitch, "send_email", timed_out)
+    operation, _ = svc._create_or_get_operation(**_gmail_request(key="unknown-timing"))
+    _approve(svc, operation)
+
+    unknown = asyncio.run(svc.execute_operation(operation["id"]))
+
+    assert unknown["status"] == "unknown"
+    assert unknown["completed_at"]
+    assert unknown["reconciled_at"] is None
+
+    reconciled = asyncio.run(svc.reconcile_operation(operation["id"]))
+
+    assert reconciled["status"] == "unknown"
+    assert reconciled["completed_at"] == unknown["completed_at"]
+    assert reconciled["reconciled_at"]
+
+
 def test_gmail_result_without_message_id_is_unknown_and_not_retryable(services, monkeypatch):
     svc, pitch, _, _ = services
 

@@ -517,6 +517,11 @@ def _finish(
     social_post_reference: Optional[str] = None,
 ) -> dict:
     timestamp = _now()
+    # An ambiguous provider response still ends the dispatch attempt. Keep
+    # that timestamp separate from a later reconciliation timestamp.
+    attempt_completed_at = timestamp if status in {"succeeded", "failed"} or (
+        status == "unknown" and not reconciled
+    ) else None
     conn = sqlite3.connect(str(_DB_PATH))
     try:
         # Publish the authoritative status and its audit event atomically.
@@ -540,8 +545,7 @@ def _finish(
             error_code,
             error_detail,
             timestamp,
-            status,
-            timestamp,
+            attempt_completed_at,
             1 if reconciled else 0,
             timestamp,
             operation_id,
@@ -553,7 +557,7 @@ def _finish(
             """UPDATE execution_operations
                SET status=?, provider_result=?, provider_reference=?,
                    error_code=?, error_detail=?, updated_at=?,
-                    completed_at=CASE WHEN ? IN ('succeeded','failed') THEN ? ELSE completed_at END,
+                   completed_at=COALESCE(?, completed_at),
                    reconciled_at=CASE WHEN ? THEN ? ELSE reconciled_at END
             """ + where,
             params,
