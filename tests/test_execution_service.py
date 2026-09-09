@@ -500,6 +500,48 @@ def test_unknown_gmail_outcome_reconciles_by_message_id(services, monkeypatch):
     assert reconciled["reconciled_at"]
 
 
+@pytest.mark.parametrize(
+    ("error", "error_code"),
+    [
+        ("Gmail is not connected", "reconciliation_unavailable"),
+        ("Gmail lookup failed", "reconciliation_failed"),
+    ],
+)
+def test_failed_gmail_reconciliation_remains_required_for_safe_retry(
+    services, monkeypatch, error, error_code,
+):
+    svc, pitch, _, _ = services
+
+    async def timed_out(*args, **kwargs):
+        raise TimeoutError("response lost")
+
+    monkeypatch.setattr(pitch, "send_email", timed_out)
+    operation, _ = svc._create_or_get_operation(**_gmail_request(key=f"reconcile-{error_code}"))
+    _approve(svc, operation)
+    unknown = asyncio.run(svc.execute_operation(operation["id"]))
+
+    if error_code == "reconciliation_unavailable":
+        monkeypatch.setattr(
+            svc,
+            "_find_gmail_message_by_rfc822_id",
+            lambda *args: (_ for _ in ()).throw(pitch.GmailNotConnected(error)),
+        )
+    else:
+        monkeypatch.setattr(
+            svc,
+            "_find_gmail_message_by_rfc822_id",
+            lambda *args: (_ for _ in ()).throw(RuntimeError(error)),
+        )
+
+    failed = asyncio.run(svc.reconcile_operation(operation["id"]))
+
+    assert unknown["status"] == "unknown"
+    assert failed["status"] == "unknown"
+    assert failed["error_code"] == error_code
+    assert failed["reconciliation_required"] is True
+    assert failed["reconciled_at"] is None
+
+
 def test_unknown_outcome_records_attempt_completion_without_collapsing_reconciliation_time(
     services, monkeypatch,
 ):
@@ -518,6 +560,10 @@ def test_unknown_outcome_records_attempt_completion_without_collapsing_reconcili
     assert unknown["completed_at"]
     assert unknown["reconciled_at"] is None
 
+    # A completed provider lookup that finds no message is a finished
+    # reconciliation with an unknown outcome, unlike an unavailable/failed
+    # lookup which must remain retryable.
+    monkeypatch.setattr(svc, "_find_gmail_message_by_rfc822_id", lambda *args: None)
     reconciled = asyncio.run(svc.reconcile_operation(operation["id"]))
 
     assert reconciled["status"] == "unknown"

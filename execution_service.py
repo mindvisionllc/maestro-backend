@@ -520,7 +520,7 @@ def _finish(
     # An ambiguous provider response still ends the dispatch attempt. Keep
     # that timestamp separate from a later reconciliation timestamp.
     attempt_completed_at = timestamp if status in {"succeeded", "failed"} or (
-        status == "unknown" and not reconciled
+        status == "unknown" and not reconciled and expected_status == "executing"
     ) else None
     conn = sqlite3.connect(str(_DB_PATH))
     try:
@@ -988,7 +988,9 @@ async def reconcile_operation(operation_id: str, artist_id: Optional[str] = None
                 "unknown",
                 error_code="reconciliation_unavailable",
                 error_detail=str(exc),
-                reconciled=True,
+                # The provider could not be queried, so the operation must
+                # remain explicitly reconcilable for a later safe retry.
+                reconciled=False,
                 expected_status="unknown",
             )
         except Exception as exc:
@@ -997,7 +999,9 @@ async def reconcile_operation(operation_id: str, artist_id: Optional[str] = None
                 "unknown",
                 error_code="reconciliation_failed",
                 error_detail=str(exc),
-                reconciled=True,
+                # A failed lookup is not a completed reconciliation. Keep the
+                # unknown outcome visible until a lookup actually completes.
+                reconciled=False,
                 expected_status="unknown",
             )
         if message:
