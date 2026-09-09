@@ -28,8 +28,9 @@ def ss(tmp_path, monkeypatch):
 
 
 class _FakeResp:
-    def __init__(self, payload):
+    def __init__(self, payload, status_code=200):
         self._payload = payload
+        self.status_code = status_code
 
     def json(self):
         return self._payload
@@ -108,3 +109,42 @@ def test_buffer_callback_wraps_exchange_failure_as_500(ss, monkeypatch):
     with pytest.raises(HTTPException) as ei:
         asyncio.run(ss.buffer_callback(code="x", state="artist-1"))
     assert ei.value.status_code == 500
+
+
+def test_buffer_callback_rejects_upstream_error_without_persisting(ss, monkeypatch):
+    monkeypatch.setattr(ss, "_BUFFER_CLIENT_SECRET", "secret-xyz", raising=False)
+
+    class _ErrorClient(_FakeAsyncClient):
+        async def post(self, url, data=None, timeout=None):
+            return _FakeResp({"error": "invalid_grant"}, status_code=400)
+
+    monkeypatch.setattr(ss.httpx, "AsyncClient", _ErrorClient)
+    saved = []
+    monkeypatch.setattr(ss, "_save_buffer_tokens", lambda *args: saved.append(args))
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(ss.buffer_callback(code="x", state="artist-1"))
+    assert ei.value.status_code == 502
+    assert ei.value.detail == "Buffer authorization could not be completed"
+    assert saved == []
+
+
+@pytest.mark.parametrize("payload", [{}, {"access_token": "   "}, ["not-an-object"]])
+def test_buffer_callback_rejects_invalid_token_response_without_persisting(ss, monkeypatch, payload):
+    monkeypatch.setattr(ss, "_BUFFER_CLIENT_SECRET", "secret-xyz", raising=False)
+
+    class _InvalidClient(_FakeAsyncClient):
+        async def post(self, url, data=None, timeout=None):
+            return _FakeResp(payload)
+
+    monkeypatch.setattr(ss.httpx, "AsyncClient", _InvalidClient)
+    saved = []
+    monkeypatch.setattr(ss, "_save_buffer_tokens", lambda *args: saved.append(args))
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(ss.buffer_callback(code="x", state="artist-1"))
+    assert ei.value.status_code == 502
+    assert ei.value.detail == "Buffer authorization returned an invalid token response"
+    assert saved == []

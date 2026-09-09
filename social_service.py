@@ -484,15 +484,36 @@ async def buffer_callback(code: str, state: str):
                 },
                 timeout=15,
             )
+        if response.status_code < 200 or response.status_code >= 300:
+            log.error("buffer_token_exchange_error", extra={
+                "event": "buffer_token_exchange_error",
+                "status": response.status_code,
+            })
+            raise HTTPException(
+                status_code=502,
+                detail="Buffer authorization could not be completed",
+            )
         tokens = response.json()
     except Exception as exc:
+        if isinstance(exc, HTTPException):
+            raise
         raise HTTPException(
             status_code=500,
-            detail=f"Buffer token exchange failed: {exc}",
+            detail="Buffer token exchange failed",
+        )
+
+    access_token = tokens.get("access_token") if isinstance(tokens, dict) else None
+    if not isinstance(access_token, str) or not access_token.strip():
+        log.error("buffer_token_exchange_invalid_response", extra={
+            "event": "buffer_token_exchange_invalid_response",
+        })
+        raise HTTPException(
+            status_code=502,
+            detail="Buffer authorization returned an invalid token response",
         )
 
     _save_buffer_tokens(artist_id, {
-        "access_token": tokens.get("access_token"),
+        "access_token": access_token.strip(),
         "stored_at": datetime.now(timezone.utc).isoformat(),
     })
     return {"status": "connected", "artist_id": artist_id}
