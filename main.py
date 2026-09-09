@@ -1174,6 +1174,8 @@ import social_service  # noqa: E402  (module ref for Riley/social-manager tool_u
 import booking_service  # noqa: E402  (module ref for Avery/booking-agent tool_use handlers)
 import pr_service  # noqa: E402  (module ref for Quinn/pr-agent tool_use handlers)
 import execution_service  # noqa: E402  (durable supported provider operations)
+import phase4_service  # noqa: E402  (push, app config, version check, IAP)
+import admin_service  # noqa: E402  (admin diagnostics and dashboard)
 from pitch_service import router as _pitch_router, init_pitch_db, init_scheduler
 app.include_router(_pitch_router)
 
@@ -1202,6 +1204,29 @@ app.include_router(_admin_router)
 # ── Phase 4 — Release campaign orchestration ──────────────────────────────────
 from release_service import router as _release_router, init_release_db, execute_all_due_campaign_actions
 app.include_router(_release_router)
+
+
+def _sync_sqlite_service_paths() -> None:
+    """Keep imported SQLite services aligned with the current process config.
+
+    Test clients reload ``main`` with an isolated DB_PATH while Python reuses
+    already-imported service modules. Without this sync, those modules keep
+    the path captured during their first import and can write to /data (or a
+    previous test database) instead of the current application database.
+    """
+    db_path = Path(os.environ.get("DB_PATH", "/data/memory.db"))
+    for service in (
+        pitch_service,
+        pr_service,
+        booking_service,
+        social_service,
+        execution_service,
+        release_service,
+        phase4_service,
+        admin_service,
+    ):
+        if hasattr(service, "_DB_PATH"):
+            service._DB_PATH = db_path
 
 # Maps agent ID (e.g. "puppet-master") → lowercase first name slug (e.g. "marcus")
 _ID_TO_NAME = {a["id"]: a["name"].lower().replace(" ", "-") for a in AGENTS}
@@ -1397,6 +1422,7 @@ def _init_pg_connection(database_url: str) -> str:
 _ensure_db()
 DATABASE_URL = _init_pg_connection(DATABASE_URL)
 _threading.Thread(target=get_kokoro, daemon=True, name="kokoro-warmup").start()
+_sync_sqlite_service_paths()
 init_pitch_db()
 init_scheduler()
 init_pr_db()
