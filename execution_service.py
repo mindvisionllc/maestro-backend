@@ -1,4 +1,3 @@
-from fastapi import Request
 """
 Durable execution ledger for the backend's existing single-action providers.
 
@@ -7,7 +6,10 @@ Batch outreach, PR, pitch, booking, and campaign actions intentionally remain
 outside this service.
 """
 
+import base64
+import binascii
 import json
+from fastapi import Request
 from artist_identity import (
     ArtistAuthError,
     decode_oauth_state,
@@ -274,6 +276,7 @@ def _list_operations(
     *,
     limit: int = 50,
     status: Optional[str] = None,
+    before: Optional[str] = None,
 ) -> list[dict]:
     """Return a bounded, newest-first execution history for one artist."""
     if limit < 1 or limit > 100:
@@ -288,6 +291,17 @@ def _list_operations(
     if status is not None:
         where.append("status=?")
         params.append(status)
+    if before:
+        try:
+            decoded = json.loads(base64.urlsafe_b64decode(before.encode("ascii") + b"=" * (-len(before) % 4)))
+            before_updated_at = decoded["updated_at"]
+            before_id = decoded["id"]
+            if not isinstance(before_updated_at, str) or not isinstance(before_id, str):
+                raise ValueError
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError, UnicodeDecodeError, binascii.Error):
+            raise HTTPException(status_code=422, detail={"code": "invalid_operation_cursor"})
+        where.append("(updated_at < ? OR (updated_at = ? AND id < ?))")
+        params.extend([before_updated_at, before_updated_at, before_id])
     params.append(limit)
 
     conn = sqlite3.connect(str(_DB_PATH))
@@ -301,6 +315,15 @@ def _list_operations(
     ).fetchall()
     conn.close()
     return [_row_to_operation(row) for row in rows]
+
+
+def _operation_cursor(operation: dict) -> str:
+    payload = json.dumps(
+        {"updated_at": operation["updated_at"], "id": operation["id"]},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
 
 
 def _get_operation_by_idempotency(
@@ -1177,15 +1200,18 @@ def list_operations(
     artist_id: str,
     limit: int = Query(50, ge=1, le=100),
     status: Optional[str] = None,
+    before: Optional[str] = None,
     request: Request = None,
 ):
     try:
         scoped_artist_id = require_artist_scope(request, artist_id)
     except ArtistAuthError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    operations = _list_operations(scoped_artist_id, limit=limit, status=status, before=before)
     return {
-        "operations": _list_operations(scoped_artist_id, limit=limit, status=status),
+        "operations": operations,
         "limit": limit,
+        "next_before": _operation_cursor(operations[-1]) if len(operations) == limit else None,
     }
 
 

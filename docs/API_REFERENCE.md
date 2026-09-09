@@ -615,8 +615,8 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 
 - **Summary:** List Operations — return bounded, newest-first durable execution history for the authenticated artist
 - **Auth:** Yes (X-API-Key)
-- **Query params:** `artist_id` (string, required), `limit` (integer, 1–100, default 50), `status` (optional: `pending`, `failed_retryable`, `executing`, `succeeded`, `failed`, `unknown`, or `canceled`)
-- **Response:** 200 — `{ operations: operation[], limit }`
+- **Query params:** `artist_id` (string, required), `limit` (integer, 1–100, default 50), `status` (optional: `pending`, `failed_retryable`, `executing`, `succeeded`, `failed`, `unknown`, or `canceled`), `before` (optional opaque cursor from the previous response)
+- **Response:** 200 — `{ operations: operation[], limit, next_before }`; pass `next_before` as `before` to load the next older page. The cursor is artist-scoped and follows the durable `(updated_at, id)` ordering.
 - **Security:** `artist_id` is enforced against the authenticated artist session; another artist's history is never returned
 
 #### GET /api/operations/lookup

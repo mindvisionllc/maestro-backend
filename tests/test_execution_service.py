@@ -1209,3 +1209,25 @@ def test_buffer_schedule_auth_expiry_is_retryable_and_restores_social_draft(serv
     assert failed["status"] == "failed_retryable"
     assert failed["error_code"] == "BufferAuthExpired"
     assert social._db_get_post("post-schedule-auth-expired")["status"] == "draft"
+
+
+def test_operation_history_cursor_continues_without_duplicates_or_cross_artist_leak(services):
+    svc, _, _, db = services
+    first, _ = svc._create_or_get_operation(**_gmail_request(key="cursor-first"))
+    second, _ = svc._create_or_get_operation(**_gmail_request(key="cursor-second"))
+    conn = sqlite3.connect(str(db))
+    conn.execute("UPDATE execution_operations SET updated_at=? WHERE id=?", ("2026-01-01T00:00:01+00:00", first["id"]))
+    conn.execute("UPDATE execution_operations SET updated_at=? WHERE id=?", ("2026-01-01T00:00:02+00:00", second["id"]))
+    conn.commit()
+    conn.close()
+
+    page = svc._list_operations("artist-1", limit=1)
+    assert page[0]["id"] == second["id"]
+    cursor = svc._operation_cursor(page[0])
+    older = svc._list_operations("artist-1", limit=1, before=cursor)
+    assert [item["id"] for item in older] == [first["id"]]
+
+    with pytest.raises(HTTPException) as exc:
+        svc._list_operations("artist-1", before="not-a-cursor")
+    assert exc.value.status_code == 422
+    assert exc.value.detail == {"code": "invalid_operation_cursor"}
