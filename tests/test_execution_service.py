@@ -67,6 +67,60 @@ def test_create_is_idempotent_and_conflicting_payload_is_rejected(services):
     assert exc.value.detail["code"] == "idempotency_conflict"
 
 
+def test_operation_input_limits_reject_before_persisting_ledger_state(services):
+    svc, _, _, db = services
+
+    with pytest.raises(HTTPException) as exc:
+        svc._create_or_get_operation(**_gmail_request(key="k" * (svc.MAX_IDENTIFIER_LENGTH + 1)))
+    assert exc.value.status_code == 422
+    assert exc.value.detail == {
+        "code": "field_too_long",
+        "field": "idempotency_key",
+        "max_length": svc.MAX_IDENTIFIER_LENGTH,
+    }
+
+    with pytest.raises(HTTPException) as exc:
+        svc._create_or_get_operation(
+            **_gmail_request(key="oversized-body", body="x" * (svc.MAX_EMAIL_BODY_LENGTH + 1))
+        )
+    assert exc.value.status_code == 422
+    assert exc.value.detail == {
+        "code": "field_too_long",
+        "field": "body",
+        "max_length": svc.MAX_EMAIL_BODY_LENGTH,
+    }
+
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("SELECT COUNT(*) FROM execution_operations").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM execution_operation_events").fetchone()[0] == 0
+    conn.close()
+
+
+def test_social_operation_limits_duplicate_and_excessive_profile_ids(services):
+    svc, _, _, _ = services
+
+    with pytest.raises(HTTPException) as exc:
+        svc._create_or_get_operation(
+            artist_id="artist-1",
+            action_type=svc.SOCIAL_SCHEDULE,
+            idempotency_key="social-too-many-profiles",
+            payload={
+                "post_id": "post-1",
+                "buffer_profile_ids": [f"profile-{i}" for i in range(svc.MAX_BUFFER_PROFILES + 1)],
+            },
+        )
+    assert exc.value.detail["code"] == "invalid_buffer_profiles"
+
+    operation, created = svc._create_or_get_operation(
+        artist_id="artist-1",
+        action_type=svc.SOCIAL_SCHEDULE,
+        idempotency_key="social-dedup-profiles",
+        payload={"post_id": "post-1", "buffer_profile_ids": ["profile-2", "profile-1", "profile-1"]},
+    )
+    assert created is True
+    assert operation["profile_binding"] == ["profile-1", "profile-2"]
+
+
 def test_idempotency_lookup_recovers_operation_without_history_scan(services):
     svc, _, _, _ = services
     operation, _ = svc._create_or_get_operation(**_gmail_request(key="lookup-key"))

@@ -40,6 +40,15 @@ GMAIL_SEND = "gmail.send"
 SOCIAL_SCHEDULE = "social.buffer.schedule"
 SUPPORTED_ACTIONS = {GMAIL_SEND, SOCIAL_SCHEDULE}
 
+# Keep the durable ledger bounded before user-controlled values are persisted
+# or handed to a provider. These are application limits, not provider limits.
+MAX_IDENTIFIER_LENGTH = 256
+MAX_EMAIL_SUBJECT_LENGTH = 998
+MAX_EMAIL_BODY_LENGTH = 256 * 1024
+MAX_SOCIAL_ID_LENGTH = 256
+MAX_BUFFER_PROFILES = 20
+MAX_OPERATION_PAYLOAD_BYTES = 512 * 1024
+
 TERMINAL_STATUSES = {"succeeded", "failed", "canceled"}
 EXECUTABLE_STATUSES = {"pending", "failed_retryable"}
 RECONCILABLE_STATUSES = {"unknown"}
@@ -320,6 +329,22 @@ def _valid_single_email_target(value: str) -> bool:
     )
 
 
+def _require_bounded_string(value, field: str, maximum: int) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise HTTPException(status_code=422, detail=f"{field} is required")
+    normalized = value.strip()
+    if len(normalized) > maximum:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "field_too_long",
+                "field": field,
+                "max_length": maximum,
+            },
+        )
+    return normalized
+
+
 def _validate_payload(action_type: str, payload: dict) -> dict:
     if action_type not in SUPPORTED_ACTIONS:
         raise HTTPException(
@@ -337,22 +362,41 @@ def _validate_payload(action_type: str, payload: dict) -> dict:
         missing = [key for key in ("to", "subject", "body") if not isinstance(payload.get(key), str) or not payload[key]]
         if missing:
             raise HTTPException(status_code=422, detail=f"Missing Gmail fields: {', '.join(missing)}")
-        normalized["to"] = payload["to"].strip()
+        normalized["to"] = _require_bounded_string(payload["to"], "to", MAX_IDENTIFIER_LENGTH)
+        normalized["subject"] = _require_bounded_string(
+            payload["subject"], "subject", MAX_EMAIL_SUBJECT_LENGTH,
+        )
+        normalized["body"] = _require_bounded_string(
+            payload["body"], "body", MAX_EMAIL_BODY_LENGTH,
+        )
         if not _valid_single_email_target(normalized["to"]):
             raise HTTPException(
                 status_code=422,
                 detail={"code": "invalid_recipient", "message": "A single valid recipient email is required."},
             )
     elif action_type == SOCIAL_SCHEDULE:
-        if not isinstance(payload.get("post_id"), str) or not payload["post_id"]:
-            raise HTTPException(status_code=422, detail="social.buffer.schedule requires post_id")
+        normalized["post_id"] = _require_bounded_string(
+            payload.get("post_id"), "post_id", MAX_SOCIAL_ID_LENGTH,
+        )
         profiles = payload.get("buffer_profile_ids")
-        if not isinstance(profiles, list) or not profiles or not all(isinstance(item, str) and item for item in profiles):
+        if (
+            not isinstance(profiles, list)
+            or not profiles
+            or len(profiles) > MAX_BUFFER_PROFILES
+            or not all(isinstance(item, str) and item.strip() for item in profiles)
+        ):
             raise HTTPException(
                 status_code=422,
-                detail="social.buffer.schedule requires non-empty buffer_profile_ids",
+                detail={
+                    "code": "invalid_buffer_profiles",
+                    "message": "social.buffer.schedule requires 1-20 non-empty profile IDs",
+                },
             )
-        normalized["buffer_profile_ids"] = sorted(set(profiles))
+        normalized_profiles = [
+            _require_bounded_string(item, "buffer_profile_id", MAX_SOCIAL_ID_LENGTH)
+            for item in profiles
+        ]
+        normalized["buffer_profile_ids"] = sorted(set(normalized_profiles))
     return normalized
 
 
@@ -363,8 +407,10 @@ def _create_or_get_operation(
     payload: dict,
 ) -> tuple[dict, bool]:
     payload = _validate_payload(action_type, payload)
-    if not artist_id.strip() or not idempotency_key.strip():
-        raise HTTPException(status_code=422, detail="artist_id and idempotency_key are required")
+    artist_id = _require_bounded_string(artist_id, "artist_id", MAX_IDENTIFIER_LENGTH)
+    idempotency_key = _require_bounded_string(
+        idempotency_key, "idempotency_key", MAX_IDENTIFIER_LENGTH,
+    )
 
     operation_id = str(uuid.uuid4())
     provider = "gmail" if action_type == GMAIL_SEND else "buffer"
@@ -373,6 +419,14 @@ def _create_or_get_operation(
     profile_binding = payload.get("buffer_profile_ids") if action_type == SOCIAL_SCHEDULE else None
     timestamp = _now()
     encoded_payload = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    if len(encoded_payload.encode("utf-8")) > MAX_OPERATION_PAYLOAD_BYTES:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "payload_too_large",
+                "max_bytes": MAX_OPERATION_PAYLOAD_BYTES,
+            },
+        )
 
     conn = sqlite3.connect(str(_DB_PATH))
     try:
