@@ -67,6 +67,19 @@ def test_create_is_idempotent_and_conflicting_payload_is_rejected(services):
     assert exc.value.detail["code"] == "idempotency_conflict"
 
 
+def test_idempotency_lookup_recovers_operation_without_history_scan(services):
+    svc, _, _, _ = services
+    operation, _ = svc._create_or_get_operation(**_gmail_request(key="lookup-key"))
+
+    recovered = svc._get_operation_by_idempotency(
+        operation["artist_id"], operation["action_type"], operation["idempotency_key"],
+    )
+    assert recovered["id"] == operation["id"]
+    assert svc._get_operation_by_idempotency(
+        "other-artist", operation["action_type"], operation["idempotency_key"],
+    ) == {}
+
+
 def test_artist_can_cancel_queued_operation_and_history_is_atomic(services):
     svc, _, _, _ = services
     operation, _ = svc._create_or_get_operation(**_gmail_request(key="cancel-queued"))

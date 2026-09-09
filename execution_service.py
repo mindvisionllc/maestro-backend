@@ -285,6 +285,23 @@ def _list_operations(
     return [_row_to_operation(row) for row in rows]
 
 
+def _get_operation_by_idempotency(
+    artist_id: str,
+    action_type: str,
+    idempotency_key: str,
+) -> dict:
+    """Look up one artist-owned operation without scanning bounded history."""
+    conn = sqlite3.connect(str(_DB_PATH))
+    row = conn.execute(
+        f"""SELECT {','.join(_OP_COLS)}
+            FROM execution_operations
+            WHERE artist_id=? AND action_type=? AND idempotency_key=?""",
+        (artist_id, action_type, idempotency_key),
+    ).fetchone()
+    conn.close()
+    return _row_to_operation(row) if row else {}
+
+
 def _valid_single_email_target(value: str) -> bool:
     if any(char in value for char in ("\r", "\n", ",", ";")):
         return False
@@ -1051,6 +1068,27 @@ def create_operation(req: OperationRequest, request: Request = None):
         req.payload,
     )
     return {"operation": operation, "created": created}
+
+
+@router.get("/api/operations/lookup", tags=["operations"])
+def lookup_operation(
+    artist_id: str,
+    action_type: str,
+    idempotency_key: str,
+    request: Request = None,
+):
+    """Recover a durable operation after a client lost its local operation ID."""
+    try:
+        scoped_artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    operation = _get_operation_by_idempotency(
+        scoped_artist_id, action_type, idempotency_key,
+    )
+    if not operation:
+        raise HTTPException(status_code=404, detail="Operation not found")
+    return operation
 
 
 
