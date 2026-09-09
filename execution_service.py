@@ -541,25 +541,28 @@ def _finish(
             """ + where,
             params,
         )
-        if cursor.rowcount == 1:
-            artist_row = conn.execute(
-                "SELECT artist_id FROM execution_operations WHERE id=?",
-                (operation_id,),
-            ).fetchone()
-            _insert_operation_event(
-                conn,
-                operation_id,
-                artist_row[0],
-                "reconciled" if reconciled else "dispatch_finished",
-                status,
-                from_status=expected_status or "executing",
-                metadata={
-                    key: value for key, value in {
-                        "error_code": error_code,
-                        "provider_reference": provider_reference,
-                    }.items() if value is not None
-                },
+        if cursor.rowcount != 1:
+            raise RuntimeError(
+                "The execution operation changed before completion; reconciliation is required."
             )
+        artist_row = conn.execute(
+            "SELECT artist_id FROM execution_operations WHERE id=?",
+            (operation_id,),
+        ).fetchone()
+        _insert_operation_event(
+            conn,
+            operation_id,
+            artist_row[0],
+            "reconciled" if reconciled else "dispatch_finished",
+            status,
+            from_status=expected_status or "executing",
+            metadata={
+                key: value for key, value in {
+                    "error_code": error_code,
+                    "provider_reference": provider_reference,
+                }.items() if value is not None
+            },
+        )
         conn.commit()
     except Exception:
         conn.rollback()

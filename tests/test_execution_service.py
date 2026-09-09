@@ -228,6 +228,47 @@ def test_social_post_completion_and_operation_history_share_a_transaction(servic
     assert post["buffer_update_id"] == ""
 
 
+def test_social_post_completion_rolls_back_when_operation_guard_is_stale(services):
+    svc, _, social, _ = services
+    social._db_create_post({
+        "id": "post-stale-completion",
+        "artist_id": "artist-1",
+        "platform": "instagram",
+        "content": "Stale completion",
+        "status": "scheduling",
+    })
+    operation, _ = svc._create_or_get_operation(
+        artist_id="artist-1",
+        action_type="social.buffer.schedule",
+        idempotency_key="stale-social-completion",
+        payload={"post_id": "post-stale-completion", "buffer_profile_ids": ["profile-1"]},
+    )
+    conn = sqlite3.connect(str(svc._DB_PATH))
+    conn.execute(
+        "UPDATE execution_operations SET status='executing' WHERE id=?",
+        (operation["id"],),
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(RuntimeError, match="changed before completion"):
+        svc._finish(
+            operation["id"],
+            "succeeded",
+            provider_reference="buffer-stale",
+            expected_status="pending",
+            social_post_id="post-stale-completion",
+            social_post_reference="buffer-stale",
+        )
+
+    current = svc._get_operation(operation["id"])
+    post = social._db_get_post("post-stale-completion")
+    assert current["status"] == "executing"
+    assert current["provider_reference"] is None
+    assert post["status"] == "scheduling"
+    assert post["buffer_update_id"] == ""
+
+
 def test_approval_and_readiness_are_idempotent_without_duplicate_events(services):
     svc, _, _, _ = services
     operation, _ = svc._create_or_get_operation(**_gmail_request(key="idempotent-gates"))
