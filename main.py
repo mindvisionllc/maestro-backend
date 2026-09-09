@@ -631,8 +631,13 @@ def get_whisper():
     return _whisper_model
 
 # ── Kokoro TTS ─────────────────────────────────────────────────────────────────
-_kokoro = None
-_kokoro_available = None
+# Keep the native TTS instance and warmup worker across importlib.reload().
+# The test suite reloads this module repeatedly, and starting a second native
+# model load while the previous one is still initializing can abort the Python
+# process. A normal process import still starts exactly one warmup worker.
+_kokoro = globals().get("_kokoro")
+_kokoro_available = globals().get("_kokoro_available")
+_kokoro_warmup_thread = globals().get("_kokoro_warmup_thread")
 _tts_lock = asyncio.Lock()
 
 def get_kokoro():
@@ -1421,7 +1426,13 @@ def _init_pg_connection(database_url: str) -> str:
 # first request arrives (avoids the 20-35s first-call warmup delay).
 _ensure_db()
 DATABASE_URL = _init_pg_connection(DATABASE_URL)
-_threading.Thread(target=get_kokoro, daemon=True, name="kokoro-warmup").start()
+if _kokoro_warmup_thread is None or not _kokoro_warmup_thread.is_alive():
+    _kokoro_warmup_thread = _threading.Thread(
+        target=get_kokoro,
+        daemon=True,
+        name="kokoro-warmup",
+    )
+    _kokoro_warmup_thread.start()
 _sync_sqlite_service_paths()
 init_pitch_db()
 init_scheduler()
