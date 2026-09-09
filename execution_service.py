@@ -960,6 +960,14 @@ async def execute_operation(operation_id: str, artist_id: Optional[str] = None) 
         if social_service._BUFFER_LIVE:
             try:
                 profiles = await social_service._buffer_list_profiles(operation["artist_id"])
+            except social_service.BufferAuthExpired as exc:
+                return _finish(
+                    operation_id,
+                    "failed_retryable",
+                    error_code=type(exc).__name__,
+                    error_detail=str(exc),
+                    expected_status="executing",
+                )
             except RuntimeError as exc:
                 return _finish(
                     operation_id,

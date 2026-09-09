@@ -434,6 +434,10 @@ class BufferNotConnected(Exception):
     pass
 
 
+class BufferAuthExpired(Exception):
+    """The artist's Buffer authorization is no longer accepted."""
+
+
 @router.get("/api/buffer/auth", tags=["buffer"])
 def buffer_auth(artist_id: str, request: Request = None):
     """Redirect the authenticated artist to Buffer OAuth."""
@@ -565,6 +569,14 @@ async def _buffer_list_profiles(artist_id: str) -> list[dict]:
         })
         raise RuntimeError("Buffer profile discovery is temporarily unavailable") from exc
 
+    if resp.status_code in (401, 403):
+        log.warning("buffer_profiles_auth_expired", extra={
+            "event": "buffer_profiles_auth_expired",
+            "status": resp.status_code,
+        })
+        raise BufferAuthExpired(
+            "Buffer authorization expired; reconnect Buffer before continuing"
+        )
     if resp.status_code != 200:
         log.error("buffer_profiles_error", extra={
             "event": "buffer_profiles_error",
@@ -613,6 +625,8 @@ async def buffer_profiles(artist_id: str, request: Request = None):
             status_code=409,
             detail="Buffer account not connected",
         )
+    except BufferAuthExpired as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 

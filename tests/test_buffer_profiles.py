@@ -94,6 +94,26 @@ def test_buffer_list_profiles_rejects_non_200(monkeypatch):
             asyncio.run(svc._buffer_list_profiles("artist-1"))
 
 
+@pytest.mark.parametrize("status_code", [401, 403])
+def test_buffer_list_profiles_classifies_expired_authorization(monkeypatch, status_code):
+    monkeypatch.setattr(
+        svc,
+        "_load_buffer_tokens",
+        lambda artist_id: {"access_token": "token-123"},
+    )
+
+    resp = _mock_response(status_code, {}, "authorization rejected")
+    client = MagicMock()
+    client.get = AsyncMock(return_value=resp)
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=client)
+    cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("social_service.httpx.AsyncClient", return_value=cm):
+        with pytest.raises(svc.BufferAuthExpired, match="reconnect Buffer"):
+            asyncio.run(svc._buffer_list_profiles("artist-1"))
+
+
 def test_buffer_list_profiles_rejects_invalid_shape(monkeypatch):
     monkeypatch.setattr(
         svc,
