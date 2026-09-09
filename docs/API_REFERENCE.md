@@ -1058,6 +1058,13 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 - **Query params:** `artist_id` (string, required)
 - **Response:** 200 — `{ devices: [...] }`
 
+#### POST /api/devices/unregister
+
+- **Summary:** Remove one artist-scoped device registration during logout or token rotation
+- **Auth:** Yes (X-API-Key)
+- **Request body:** `artist_id` (string, required), `platform` ("ios"|"android", required), `token` (string, min 8 chars, required)
+- **Response:** 200 — `{ removed: bool }`; repeated removal is safely idempotent
+
 #### POST /api/push/send
 
 - **Summary:** Push Send — send push notification to all registered devices for an artist (internal)

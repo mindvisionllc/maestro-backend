@@ -166,6 +166,12 @@ class DeviceRegisterRequest(BaseModel):
     app_version: str = ""
 
 
+class DeviceUnregisterRequest(BaseModel):
+    artist_id: str
+    platform: str
+    token: str
+
+
 @router.post("/api/devices/register", status_code=201, tags=["phase4"])
 def register_device(req: DeviceRegisterRequest, request: Request = None):
     """Register an iOS or Android device token for push notifications."""
@@ -194,6 +200,35 @@ def list_devices(artist_id: str, request: Request = None):
     except ArtistAuthError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return {"devices": [_public_device_record(device) for device in _db_list_device_tokens(artist_id)]}
+
+
+@router.post("/api/devices/unregister", tags=["phase4"])
+def unregister_device(req: DeviceUnregisterRequest, request: Request = None):
+    """Remove one artist-scoped device registration during logout or rotation."""
+    try:
+        artist_id = require_artist_scope(request, req.artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    platform = req.platform.lower()
+    if platform not in ("ios", "android"):
+        raise HTTPException(status_code=400, detail="platform must be 'ios' or 'android'")
+    if not req.token or len(req.token) < 8:
+        raise HTTPException(status_code=400, detail="Invalid device token")
+    conn = sqlite3.connect(str(_DB_PATH))
+    try:
+        cursor = conn.execute(
+            "DELETE FROM device_tokens WHERE artist_id=? AND platform=? AND token=?",
+            (artist_id, platform, req.token),
+        )
+        conn.commit()
+        removed = cursor.rowcount
+    finally:
+        conn.close()
+    log.info("device_unregistered", extra={
+        "event": "device_unregistered", "artist_id": artist_id,
+        "platform": platform, "removed": removed,
+    })
+    return {"removed": removed == 1}
 
 
 class NotificationSendRequest(BaseModel):

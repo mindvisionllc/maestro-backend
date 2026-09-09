@@ -112,6 +112,31 @@ def test_list_devices_redacts_push_tokens(client):
     assert "token" not in device
 
 
+def test_unregister_device_removes_only_matching_artist_registration(client):
+    for artist_id in ("artist-unregister", "artist-other"):
+        response = client.post("/api/devices/register", json={
+            "artist_id": artist_id,
+            "platform": "ios",
+            "token": _VALID_TOKEN,
+        }, headers=_HEADERS)
+        assert response.status_code == 201
+
+    response = client.post("/api/devices/unregister", json={
+        "artist_id": "artist-unregister",
+        "platform": "ios",
+        "token": _VALID_TOKEN,
+    }, headers=_HEADERS)
+    assert response.status_code == 200
+    assert response.json() == {"removed": True}
+    assert client.get("/api/devices?artist_id=artist-unregister", headers=_HEADERS).json()["devices"] == []
+    assert len(client.get("/api/devices?artist_id=artist-other", headers=_HEADERS).json()["devices"]) == 1
+
+
+def test_unregister_device_is_idempotent(client):
+    payload = {"artist_id": "artist-unregister-idempotent", "platform": "android", "token": _VALID_TOKEN}
+    assert client.post("/api/devices/unregister", json=payload, headers=_HEADERS).json() == {"removed": False}
+
+
 def test_register_device_android_happy_path(client):
     r = client.post("/api/devices/register", json={
         "artist_id": "artist-android-001",
