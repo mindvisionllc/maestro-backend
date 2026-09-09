@@ -496,12 +496,25 @@ def _finish(
     error_detail: Optional[str] = None,
     reconciled: bool = False,
     expected_status: Optional[str] = None,
+    social_post_id: Optional[str] = None,
+    social_post_reference: Optional[str] = None,
 ) -> dict:
     timestamp = _now()
     conn = sqlite3.connect(str(_DB_PATH))
     try:
         # Publish the authoritative status and its audit event atomically.
         conn.execute("BEGIN IMMEDIATE")
+        if social_post_id is not None:
+            post_cursor = conn.execute(
+                """UPDATE social_posts
+                   SET status='scheduled', buffer_update_id=?
+                   WHERE id=? AND status='scheduling'""",
+                (social_post_reference or "", social_post_id),
+            )
+            if post_cursor.rowcount != 1:
+                raise RuntimeError(
+                    "The social post could not be durably marked scheduled; reconciliation is required."
+                )
         where = "WHERE id=?"
         params = [
             status,
@@ -811,16 +824,14 @@ async def execute_operation(operation_id: str, artist_id: Optional[str] = None) 
                 expected_status="executing",
             )
         provider_reference = result.get("id")
-        social_service._db_update_post(
-            post["id"],
-            {"status": "scheduled", "buffer_update_id": provider_reference or ""},
-        )
         return _finish(
             operation_id,
             "succeeded",
             provider_result=result,
             provider_reference=provider_reference,
             expected_status="executing",
+            social_post_id=post["id"],
+            social_post_reference=provider_reference,
         )
     except (pitch_service.GmailNotConnected, pitch_service.GmailAuthExpired) as exc:
         return _finish(

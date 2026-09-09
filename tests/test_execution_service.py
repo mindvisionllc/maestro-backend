@@ -183,6 +183,51 @@ def test_finish_rolls_back_status_when_history_event_cannot_be_recorded(
     assert [event["event_type"] for event in current["events"]] == ["created"]
 
 
+def test_social_post_completion_and_operation_history_share_a_transaction(services, monkeypatch):
+    svc, _, social, _ = services
+    social._db_create_post({
+        "id": "post-atomic-completion",
+        "artist_id": "artist-1",
+        "platform": "instagram",
+        "content": "Atomic completion",
+        "status": "scheduling",
+    })
+    operation, _ = svc._create_or_get_operation(
+        artist_id="artist-1",
+        action_type="social.buffer.schedule",
+        idempotency_key="atomic-social-completion",
+        payload={"post_id": "post-atomic-completion", "buffer_profile_ids": ["profile-1"]},
+    )
+    conn = sqlite3.connect(str(svc._DB_PATH))
+    conn.execute(
+        "UPDATE execution_operations SET status='executing' WHERE id=?",
+        (operation["id"],),
+    )
+    conn.commit()
+    conn.close()
+
+    def fail_history(*args, **kwargs):
+        raise sqlite3.OperationalError("history unavailable")
+
+    monkeypatch.setattr(svc, "_insert_operation_event", fail_history)
+    with pytest.raises(sqlite3.OperationalError):
+        svc._finish(
+            operation["id"],
+            "succeeded",
+            provider_reference="buffer-atomic",
+            expected_status="executing",
+            social_post_id="post-atomic-completion",
+            social_post_reference="buffer-atomic",
+        )
+
+    current = svc._get_operation(operation["id"])
+    post = social._db_get_post("post-atomic-completion")
+    assert current["status"] == "executing"
+    assert current["provider_reference"] is None
+    assert post["status"] == "scheduling"
+    assert post["buffer_update_id"] == ""
+
+
 def test_approval_and_readiness_are_idempotent_without_duplicate_events(services):
     svc, _, _, _ = services
     operation, _ = svc._create_or_get_operation(**_gmail_request(key="idempotent-gates"))
