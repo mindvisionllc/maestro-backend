@@ -95,6 +95,21 @@ def test_register_device_ios_happy_path(client):
     d = r.json()
     assert d["platform"] == "ios"
     assert d["artist_id"] == "artist-ios-001"
+    assert d["token_registered"] is True
+    assert "token" not in d
+
+
+def test_list_devices_redacts_push_tokens(client):
+    client.post("/api/devices/register", json={
+        "artist_id": "artist-redaction-001",
+        "platform": "ios",
+        "token": _VALID_TOKEN,
+    }, headers=_HEADERS)
+    response = client.get("/api/devices?artist_id=artist-redaction-001", headers=_HEADERS)
+    assert response.status_code == 200, response.text
+    device = response.json()["devices"][0]
+    assert device["token_registered"] is True
+    assert "token" not in device
 
 
 def test_register_device_android_happy_path(client):

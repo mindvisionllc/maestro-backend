@@ -105,6 +105,15 @@ def _db_list_device_tokens(artist_id: str) -> list[dict]:
     return [dict(zip(cols, r)) for r in rows]
 
 
+def _public_device_record(device: dict) -> dict:
+    """Return device metadata without exposing the reusable push token."""
+    return {
+        key: value
+        for key, value in device.items()
+        if key != "token"
+    } | {"token_registered": bool(device.get("token"))}
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Push notification stubs
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -174,7 +183,7 @@ def register_device(req: DeviceRegisterRequest, request: Request = None):
         "event": "device_registered", "artist_id": req.artist_id,
         "platform": platform, "app_version": req.app_version,
     })
-    return record
+    return _public_device_record(record)
 
 
 @router.get("/api/devices", tags=["phase4"])
@@ -184,7 +193,7 @@ def list_devices(artist_id: str, request: Request = None):
         artist_id = require_artist_scope(request, artist_id)
     except ArtistAuthError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    return {"devices": _db_list_device_tokens(artist_id)}
+    return {"devices": [_public_device_record(device) for device in _db_list_device_tokens(artist_id)]}
 
 
 class NotificationSendRequest(BaseModel):
