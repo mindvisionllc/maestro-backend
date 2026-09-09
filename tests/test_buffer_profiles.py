@@ -22,6 +22,27 @@ def test_buffer_list_profiles_requires_connection(monkeypatch):
         asyncio.run(svc._buffer_list_profiles("artist-1"))
 
 
+@pytest.mark.parametrize("stored_tokens", [None, [], "token", {}, {"access_token": "   "}, {"access_token": 123}])
+def test_buffer_token_loader_treats_malformed_saved_data_as_disconnected(monkeypatch, stored_tokens):
+    monkeypatch.setattr(svc, "_load_artist_data", lambda artist_id: {"buffer_tokens": stored_tokens})
+
+    assert svc._load_buffer_tokens("artist-1") == {}
+
+
+def test_buffer_token_loader_strips_and_does_not_expose_extra_saved_fields(monkeypatch):
+    monkeypatch.setattr(
+        svc,
+        "_load_artist_data",
+        lambda artist_id: {"buffer_tokens": {
+            "access_token": " token-123 ",
+            "refresh_token": "must-not-be-used",
+            "stored_at": "2026-09-09T12:00:00+00:00",
+        }},
+    )
+
+    assert svc._load_buffer_tokens("artist-1") == {"access_token": "token-123"}
+
+
 def test_buffer_list_profiles_fetches_profiles(monkeypatch):
     monkeypatch.setattr(
         svc,

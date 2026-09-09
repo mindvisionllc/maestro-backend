@@ -411,7 +411,17 @@ def delete_post(post_id: str, request: Request = None):
 
 def _load_buffer_tokens(artist_id: str) -> dict:
     profile = _load_artist_data(artist_id)
-    return profile.get("buffer_tokens", {})
+    # Treat legacy/corrupt artist data as disconnected. Buffer credentials
+    # are only usable when the stored value has the exact shape this service
+    # owns; callers must never crash or attempt a provider request because a
+    # profile file contains an unexpected JSON value.
+    tokens = profile.get("buffer_tokens", {})
+    if not isinstance(tokens, dict):
+        return {}
+    access_token = tokens.get("access_token")
+    if not isinstance(access_token, str) or not access_token.strip():
+        return {}
+    return {"access_token": access_token.strip()}
 
 
 def _save_buffer_tokens(artist_id: str, tokens: dict):
