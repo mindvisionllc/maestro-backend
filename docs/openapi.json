@@ -2923,6 +2923,46 @@
         }
       }
     },
+    "/api/devices/unregister": {
+      "post": {
+        "tags": [
+          "phase4"
+        ],
+        "summary": "Unregister Device",
+        "description": "Remove one artist-scoped device registration during logout or rotation.",
+        "operationId": "unregister_device_api_devices_unregister_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceUnregisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/push/send": {
       "post": {
         "tags": [
@@ -6203,6 +6243,29 @@
           "token"
         ],
         "title": "DeviceRegisterRequest"
+      },
+      "DeviceUnregisterRequest": {
+        "properties": {
+          "artist_id": {
+            "type": "string",
+            "title": "Artist Id"
+          },
+          "platform": {
+            "type": "string",
+            "title": "Platform"
+          },
+          "token": {
+            "type": "string",
+            "title": "Token"
+          }
+        },
+        "type": "object",
+        "required": [
+          "artist_id",
+          "platform",
+          "token"
+        ],
+        "title": "DeviceUnregisterRequest"
       },
       "GenerateBookingRequest": {
         "properties": {

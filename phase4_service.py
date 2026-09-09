@@ -122,10 +122,10 @@ async def _send_apns(token: str, title: str, body: str, data: dict) -> dict:
     """APNs stub — only active when APNS_LIVE=true and APNS_CERT_PATH is set."""
     if not _APNS_LIVE or not _APNS_CERT_PATH:
         log.info("would_have_sent_apns", extra={
-            "event": "would_have_sent_apns", "token_prefix": token[:8],
+            "event": "would_have_sent_apns",
             "title": title, "reason": "APNS_LIVE not enabled",
         })
-        return {"mocked": True, "platform": "ios", "token_prefix": token[:8]}
+        return {"mocked": True, "platform": "ios"}
 
     # Real APNs implementation goes here when APNS_LIVE=true.
     # Use apns2 or httpx with APNs HTTP/2 API.
@@ -134,17 +134,17 @@ async def _send_apns(token: str, title: str, body: str, data: dict) -> dict:
         "event": "apns_live_not_implemented",
         "note": "APNS_LIVE=true but real APNs client not yet wired",
     })
-    return {"mocked": True, "platform": "ios", "token_prefix": token[:8], "note": "live_stub"}
+    return {"mocked": True, "platform": "ios", "note": "live_stub"}
 
 
 async def _send_fcm(token: str, title: str, body: str, data: dict) -> dict:
     """FCM stub — only active when FCM_LIVE=true and FCM_SERVER_KEY is set."""
     if not _FCM_LIVE or not _FCM_SERVER_KEY:
         log.info("would_have_sent_fcm", extra={
-            "event": "would_have_sent_fcm", "token_prefix": token[:8],
+            "event": "would_have_sent_fcm",
             "title": title, "reason": "FCM_LIVE not enabled",
         })
-        return {"mocked": True, "platform": "android", "token_prefix": token[:8]}
+        return {"mocked": True, "platform": "android"}
 
     # Real FCM implementation goes here when FCM_LIVE=true.
     # Use httpx to POST to https://fcm.googleapis.com/fcm/send with Authorization header.
@@ -152,7 +152,7 @@ async def _send_fcm(token: str, title: str, body: str, data: dict) -> dict:
         "event": "fcm_live_not_implemented",
         "note": "FCM_LIVE=true but real FCM client not yet wired",
     })
-    return {"mocked": True, "platform": "android", "token_prefix": token[:8], "note": "live_stub"}
+    return {"mocked": True, "platform": "android", "note": "live_stub"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -261,8 +261,10 @@ async def push_send(req: NotificationSendRequest, request: Request = None):
                 r = await _send_fcm(device["token"], req.title, req.body, req.data)
             results["results"].append(r)
             results["sent"] += 1
-        except Exception as e:
-            results["errors"].append(f"{device['platform']}:{device['token'][:8]}: {e}")
+        except Exception:
+            # Provider error text can echo request details. Keep token material
+            # and provider-specific secrets out of the artist-facing response.
+            results["errors"].append(f"{device['platform']}: delivery failed")
 
     log.info("notification_sent", extra={
         "event": "notification_sent", "artist_id": req.artist_id,

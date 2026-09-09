@@ -220,6 +220,32 @@ def test_send_notification_dispatches_to_registered_devices(p4):
     platforms = {r["platform"] for r in result["results"]}
     assert "ios" in platforms
     assert "android" in platforms
+    response_text = str(result)
+    assert _VALID_TOKEN not in response_text
+    assert "token_prefix" not in response_text
+
+
+def test_push_send_failure_does_not_expose_token_or_provider_error(client, p4, monkeypatch):
+    p4._db_register_device("artist-push-error", "ios", _VALID_TOKEN, "1.2.0")
+
+    async def fail_send(*args, **kwargs):
+        raise RuntimeError(f"provider rejected token {_VALID_TOKEN}")
+
+    monkeypatch.setattr(p4, "_send_apns", fail_send)
+    response = client.post("/api/push/send", json={
+        "artist_id": "artist-push-error",
+        "title": "Test",
+        "body": "Push body",
+    }, headers=_HEADERS)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "sent": 0,
+        "errors": ["ios: delivery failed"],
+        "results": [],
+    }
+    assert _VALID_TOKEN not in response.text
+    assert "provider rejected" not in response.text
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
