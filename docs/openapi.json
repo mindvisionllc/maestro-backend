@@ -39,7 +39,7 @@
           "gmail"
         ],
         "summary": "Gmail Auth",
-        "description": "Redirect artist to Google OAuth consent screen.",
+        "description": "Redirect the authenticated artist to Google OAuth.",
         "operationId": "gmail_auth_api_gmail_auth_get",
         "parameters": [
           {
@@ -80,7 +80,7 @@
           "gmail"
         ],
         "summary": "Gmail Callback",
-        "description": "Exchange OAuth code for tokens and persist in artist profile.",
+        "description": "Exchange OAuth code using signed artist-bound state.",
         "operationId": "gmail_callback_api_gmail_callback_get",
         "parameters": [
           {
@@ -130,7 +130,7 @@
           "gmail"
         ],
         "summary": "Gmail Status",
-        "description": "Return whether artist has active Gmail tokens.",
+        "description": "Return only the authenticated artist's Gmail connection state.",
         "operationId": "gmail_status_api_gmail_status_get",
         "parameters": [
           {
@@ -171,7 +171,7 @@
           "gmail"
         ],
         "summary": "Api Send Email",
-        "description": "Send a one-off email via artist's connected Gmail account.",
+        "description": "Legacy direct-send route retained only as an explicit safety tripwire.\n\nConsequential Gmail sends must be created, approved, and executed through\n/api/operations so the durable approval/idempotency ledger cannot be bypassed.",
         "operationId": "api_send_email_api_gmail_send_post",
         "requestBody": {
           "content": {
@@ -515,7 +515,6 @@
           "curators"
         ],
         "summary": "Seed Curators Endpoint",
-        "description": "Load curators from data/curators_seed.json. Idempotent.",
         "operationId": "seed_curators_endpoint_api_curators_seed_post",
         "responses": {
           "200": {
@@ -575,7 +574,7 @@
           "pitches"
         ],
         "summary": "Send Pitch Emails",
-        "description": "For each curator_id:\n  1. generate_pitch_email()  \u2192 draft\n  2. _db_create_pitch()      \u2192 status=draft\n  3. send_email()            \u2192 status=sent\nReturns {\"sent\": N, \"failed\": M, \"errors\": [...], \"pitch_ids\": [...]}.",
+        "description": "Legacy batch send is disabled because it bypasses durable approval.\n\nGenerate drafts with /api/pitches/generate, then create one gmail.send\noperation per approved recipient through /api/operations.",
         "operationId": "send_pitch_emails_api_pitches_batch_post",
         "requestBody": {
           "content": {
@@ -1070,7 +1069,7 @@
           "pr"
         ],
         "summary": "Send Pr Emails",
-        "description": "For each contact: generate PR email, save outreach record (draft),\nsend via Gmail, update status to sent.\nReturns {\"sent\": N, \"failed\": M, \"errors\": [...], \"outreach_ids\": [...]}.",
+        "description": "Legacy PR batch send is disabled because it bypasses durable approval.",
         "operationId": "send_pr_emails_api_pr_outreach_batch_post",
         "requestBody": {
           "content": {
@@ -1575,7 +1574,7 @@
           "booking"
         ],
         "summary": "Send Booking Emails",
-        "description": "For each contact: generate booking email, save inquiry record (draft),\nsend via Gmail, update status to sent.\nReturns {\"sent\": N, \"failed\": M, \"errors\": [...], \"inquiry_ids\": [...]}.",
+        "description": "Legacy booking batch send is disabled because it bypasses durable approval.",
         "operationId": "send_booking_emails_api_booking_inquiries_batch_post",
         "requestBody": {
           "content": {
@@ -1957,7 +1956,7 @@
           "buffer"
         ],
         "summary": "Buffer Auth",
-        "description": "Redirect artist to Buffer OAuth consent screen.",
+        "description": "Redirect the authenticated artist to Buffer OAuth.",
         "operationId": "buffer_auth_api_buffer_auth_get",
         "parameters": [
           {
@@ -1998,7 +1997,7 @@
           "buffer"
         ],
         "summary": "Buffer Callback",
-        "description": "Handle Buffer OAuth callback \u2014 exchange code for access token and store it.",
+        "description": "Exchange Buffer code using signed artist-bound state.",
         "operationId": "buffer_callback_api_buffer_callback_get",
         "parameters": [
           {
@@ -2082,6 +2081,46 @@
         }
       }
     },
+    "/api/buffer/profiles": {
+      "get": {
+        "tags": [
+          "buffer"
+        ],
+        "summary": "Buffer Profiles",
+        "operationId": "buffer_profiles_api_buffer_profiles_get",
+        "parameters": [
+          {
+            "name": "artist_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Artist Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/social/posts/generate": {
       "post": {
         "tags": [
@@ -2127,7 +2166,7 @@
           "social"
         ],
         "summary": "Schedule Posts",
-        "description": "Generate req.posts_per_platform posts for each platform.\nSpace them evenly across the week starting from start_date.\nOptionally schedule via Buffer (mocked).\nReturns {\"generated\": N, \"scheduled_via_buffer\": M, \"errors\": [...], \"post_ids\": [...]}.",
+        "description": "Generate draft posts; consequential Buffer scheduling uses operations only.",
         "operationId": "schedule_posts_api_social_posts_batch_post",
         "requestBody": {
           "content": {
@@ -2290,6 +2329,724 @@
         }
       }
     },
+    "/api/operations": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "List Operations",
+        "operationId": "list_operations_api_operations_get",
+        "parameters": [
+          {
+            "name": "artist_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Artist Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Create Operation",
+        "operationId": "create_operation_api_operations_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/operations/lookup": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Lookup Operation",
+        "description": "Recover a durable operation after a client lost its local operation ID.",
+        "operationId": "lookup_operation_api_operations_lookup_get",
+        "parameters": [
+          {
+            "name": "artist_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Artist Id"
+            }
+          },
+          {
+            "name": "action_type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Action Type"
+            }
+          },
+          {
+            "name": "idempotency_key",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Idempotency Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/operations/execute": {
+      "post": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Create And Execute Operation",
+        "operationId": "create_and_execute_operation_api_operations_execute_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/operations/{operation_id}/approve": {
+      "post": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Api Approve Operation",
+        "operationId": "api_approve_operation_api_operations__operation_id__approve_post",
+        "parameters": [
+          {
+            "name": "operation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Operation Id"
+            }
+          },
+          {
+            "name": "artist_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Artist Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/operations/{operation_id}/ready": {
+      "post": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Api Mark Operation Ready",
+        "operationId": "api_mark_operation_ready_api_operations__operation_id__ready_post",
+        "parameters": [
+          {
+            "name": "operation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Operation Id"
+            }
+          },
+          {
+            "name": "artist_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Artist Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/operations/{operation_id}/cancel": {
+      "post": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Api Cancel Operation",
+        "operationId": "api_cancel_operation_api_operations__operation_id__cancel_post",
+        "parameters": [
+          {
+            "name": "operation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Operation Id"
+            }
+          },
+          {
+            "name": "artist_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Artist Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/operations/{operation_id}": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Get Operation",
+        "operationId": "get_operation_api_operations__operation_id__get",
+        "parameters": [
+          {
+            "name": "operation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Operation Id"
+            }
+          },
+          {
+            "name": "artist_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Artist Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/operations/{operation_id}/execute": {
+      "post": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Api Execute Operation",
+        "operationId": "api_execute_operation_api_operations__operation_id__execute_post",
+        "parameters": [
+          {
+            "name": "operation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Operation Id"
+            }
+          },
+          {
+            "name": "artist_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Artist Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/operations/{operation_id}/reconcile": {
+      "post": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Api Reconcile Operation",
+        "operationId": "api_reconcile_operation_api_operations__operation_id__reconcile_post",
+        "parameters": [
+          {
+            "name": "operation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Operation Id"
+            }
+          },
+          {
+            "name": "artist_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Artist Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/devices/register": {
+      "post": {
+        "tags": [
+          "phase4"
+        ],
+        "summary": "Register Device",
+        "description": "Register an iOS or Android device token for push notifications.",
+        "operationId": "register_device_api_devices_register_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceRegisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/devices": {
+      "get": {
+        "tags": [
+          "phase4"
+        ],
+        "summary": "List Devices",
+        "description": "List registered device tokens for an artist.",
+        "operationId": "list_devices_api_devices_get",
+        "parameters": [
+          {
+            "name": "artist_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Artist Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/push/send": {
+      "post": {
+        "tags": [
+          "phase4"
+        ],
+        "summary": "Push Send",
+        "description": "Send push notification to all registered devices for an artist.\nAPNs and FCM clients are stubs behind APNS_LIVE / FCM_LIVE flags (default false).",
+        "operationId": "push_send_api_push_send_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotificationSendRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/app/config": {
+      "get": {
+        "tags": [
+          "phase4"
+        ],
+        "summary": "Get App Config",
+        "description": "Return app version requirements, feature flags, kill-switches, and support URLs.\nVersioned so old app builds still function in degraded mode.",
+        "operationId": "get_app_config_api_app_config_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/app/version-check": {
+      "post": {
+        "tags": [
+          "phase4"
+        ],
+        "summary": "Version Check",
+        "description": "Frontend sends current app version; backend responds:\n  ok                   \u2014 version is current, no action needed\n  soft_update          \u2014 newer version available, update recommended\n  hard_update_required \u2014 version below minimum, app must update before use",
+        "operationId": "version_check_api_app_version_check_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VersionCheckRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/iap/validate-receipt": {
+      "post": {
+        "tags": [
+          "phase4"
+        ],
+        "summary": "Validate Iap Receipt",
+        "description": "In-app purchase receipt validation stub.\nApple receipt validation client is behind IAP_LIVE flag (default false).\nStripe remains the primary billing rail; this is for App Store compliance.",
+        "operationId": "validate_iap_receipt_api_iap_validate_receipt_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IAPValidateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/stats": {
       "get": {
         "tags": [
@@ -2407,6 +3164,26 @@
         }
       }
     },
+    "/api/admin/diagnostics/scheduler": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Admin Diagnostics Scheduler",
+        "description": "Scheduler queue state: next 10 pending, last 20 completed, 24h status counts. Auth required.",
+        "operationId": "admin_diagnostics_scheduler_api_admin_diagnostics_scheduler_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/diagnostics": {
       "get": {
         "tags": [
@@ -2441,6 +3218,28 @@
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/admin/dashboard": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Admin Dashboard",
+        "description": "In-app admin monitoring dashboard \u2014 server-rendered HTML.\n\nRequires X-API-Key (same middleware as all protected routes).\nThe page JS stores the key in sessionStorage for in-page API fetches.\n\nDecision: static HTML file at static/admin_dashboard.html (no Jinja2 \u2014 existing\ncodebase has no templates dir; static/ is already copied in Dockerfile).",
+        "operationId": "admin_dashboard_admin_dashboard_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
               }
             }
           }
@@ -3214,7 +4013,7 @@
     "/api/artist/lookup": {
       "get": {
         "summary": "Lookup Artist",
-        "description": "Find existing artist profile by name (case-insensitive) across all artist profiles.",
+        "description": "Return only the authenticated artist's own profile.",
         "operationId": "lookup_artist_api_artist_lookup_get",
         "parameters": [
           {
@@ -3289,7 +4088,7 @@
     "/api/auth/verify-otp": {
       "post": {
         "summary": "Verify Otp",
-        "description": "Verify a 6-digit OTP. Consumes the code on success.",
+        "description": "Verify OTP and issue the canonical signed artist session.",
         "operationId": "verify_otp_api_auth_verify_otp_post",
         "requestBody": {
           "content": {
@@ -3323,10 +4122,26 @@
         }
       }
     },
+    "/api/auth/logout": {
+      "post": {
+        "summary": "Logout Artist Session",
+        "description": "Revoke the current artist session before the client clears local state.",
+        "operationId": "logout_artist_session_api_auth_logout_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/notifications/register": {
       "post": {
         "summary": "Register Push Token",
-        "description": "Save Expo push token to the artist's JSON file.",
         "operationId": "register_push_token_api_notifications_register_post",
         "requestBody": {
           "content": {
@@ -3363,7 +4178,7 @@
     "/api/notifications/send": {
       "post": {
         "summary": "Send Notification",
-        "description": "Send a push notification to an artist via Expo push API and store in history.",
+        "description": "Send a push notification only within the authenticated artist scope.",
         "operationId": "send_notification_api_notifications_send_post",
         "requestBody": {
           "content": {
@@ -3400,7 +4215,6 @@
     "/api/notifications/{artist_id}": {
       "get": {
         "summary": "Get Notifications",
-        "description": "Return the artist's notification history from their JSON file.",
         "operationId": "get_notifications_api_notifications__artist_id__get",
         "parameters": [
           {
@@ -3576,10 +4390,626 @@
           }
         }
       }
+    },
+    "/api/agents/ar-scout/assess/demo": {
+      "get": {
+        "tags": [
+          "ar-scout"
+        ],
+        "summary": "Ar Scout Assess Demo",
+        "description": "Render a mocked A&R scored assessment as a standalone HTML scorecard.\nDemonstrates the pilot end-to-end without any live API calls.",
+        "operationId": "ar_scout_assess_demo_api_agents_ar_scout_assess_demo_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/ar-scout/assess": {
+      "post": {
+        "tags": [
+          "ar-scout"
+        ],
+        "summary": "Ar Scout Assess",
+        "description": "Deep A&R assessment for a PLMKR artist + track.\n\nArtist identity is bound from the request payload (artist.name from release/\ntrack metadata), NOT from the Playmaker account profile, to prevent\naccount-name vs. credited-artist mismatches.\n\nWhen AR_SCOUT_MOCK_MODE=true (default), returns a canned scored assessment\nwithout calling the Anthropic API. Set AR_SCOUT_MOCK_MODE=false with a\nvalid ANTHROPIC_API_KEY to run a live assessment.",
+        "operationId": "ar_scout_assess_api_agents_ar_scout_assess_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArScoutAssessRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/grid-prophet/assess": {
+      "post": {
+        "tags": [
+          "grid-prophet"
+        ],
+        "summary": "Grid Prophet Assess",
+        "description": "Marketing readiness assessment for a PLMKR artist + campaign.\n\nArtist identity is bound from the request payload (artist.name from release/\ntrack metadata), NOT from the Playmaker account profile, to prevent\naccount-name vs. credited-artist mismatches.\n\nWhen GRID_PROPHET_MOCK_MODE=true (default), returns a canned scored assessment\nwithout calling the Anthropic API. Set GRID_PROPHET_MOCK_MODE=false with a\nvalid ANTHROPIC_API_KEY to run a live assessment.",
+        "operationId": "grid_prophet_assess_api_agents_grid_prophet_assess_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GridProphetAssessRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/brand-connect/assess": {
+      "post": {
+        "tags": [
+          "brand-connect"
+        ],
+        "summary": "Brand Connect Assess",
+        "description": "Brand partnership deal quality assessment for a PLMKR artist + proposed deal.\n\nArtist identity is bound from the request payload (artist.name from release/\ntrack metadata), NOT from the Playmaker account profile, to prevent\naccount-name vs. credited-artist mismatches.\n\nWhen BRAND_CONNECT_MOCK_MODE=true (default), returns a canned scored\nassessment without calling the Anthropic API. Set BRAND_CONNECT_MOCK_MODE=false\nwith a valid ANTHROPIC_API_KEY to run a live assessment.",
+        "operationId": "brand_connect_assess_api_agents_brand_connect_assess_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BrandConnectAssessRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/sync-agent/assess": {
+      "post": {
+        "tags": [
+          "sync-agent"
+        ],
+        "summary": "Sync Agent Assess",
+        "description": "Sync licensing brief-fit assessment for a PLMKR artist + track + brief.\n\nArtist identity is bound from the request payload (artist_name from\ntrack/release metadata), NOT from the Playmaker account profile, to prevent\naccount-name vs. credited-artist mismatches.\n\nWhen SYNC_AGENT_MOCK_MODE=true (default), returns a canned scored assessment\nwithout calling the Anthropic API. Set SYNC_AGENT_MOCK_MODE=false with a\nvalid ANTHROPIC_API_KEY to run a live assessment.",
+        "operationId": "sync_agent_assess_api_agents_sync_agent_assess_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SyncAgentAssessRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/lex-cipher/assess": {
+      "post": {
+        "tags": [
+          "lex-cipher"
+        ],
+        "summary": "Lex Cipher Assess",
+        "description": "Legal deal / document quality assessment for a PLMKR artist's agreement.\n\nThe agent DRAFTS and FLAGS \u2014 it never advises, never gives a legal opinion,\nand never recommends a negotiation position. It scores the eight-dimension\nDeal/Document Quality Rubric, states the four hard gates, classifies legal\nrisk severity, and routes execution to qualified entertainment counsel.\n\nArtist identity is bound from the request payload (artist_name from the\ndeal/release context), NOT from the Playmaker account profile, to prevent\naccount-name vs. credited-artist mismatches.\n\nWhen LEX_CIPHER_MOCK_MODE=true (default), returns a canned scored assessment\nwithout calling the Anthropic API. Set LEX_CIPHER_MOCK_MODE=false with a\nvalid ANTHROPIC_API_KEY to run a live assessment.",
+        "operationId": "lex_cipher_assess_api_agents_lex_cipher_assess_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LexCipherAssessRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/tour-commander/assess": {
+      "post": {
+        "tags": [
+          "tour-commander"
+        ],
+        "summary": "Tour Commander Assess",
+        "description": "Tour campaign quality assessment for a PLMKR artist's touring plan.\n\nThe agent scores the eight-dimension Tour Campaign Quality Rubric (routing\nlogic, financial-model integrity, offer-evaluation quality, production\nreadiness, ticketing strategy, international readiness, merch planning,\nsettlement process), states the four hard gates, computes a PROVISIONAL\ncomposite, and classifies campaign risk severity. It scores PLANNING STATE \u2014\nnot box-office outcome \u2014 and routes contracts, permits, and detailed\nfinancial modeling to the appropriate functions and qualified counsel.\n\nArtist identity is bound from the request payload (artist_name from the\ntouring context), NOT from the Playmaker account profile, to prevent\naccount-name vs. credited-artist mismatches.\n\nWhen TOUR_COMMANDER_MOCK_MODE=true (default), returns a canned scored\nassessment without calling the Anthropic API. Set TOUR_COMMANDER_MOCK_MODE=false\nwith a valid ANTHROPIC_API_KEY to run a live assessment.",
+        "operationId": "tour_commander_assess_api_agents_tour_commander_assess_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TourCommanderAssessRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/ink-and-air/assess": {
+      "post": {
+        "tags": [
+          "ink-and-air"
+        ],
+        "summary": "Ink And Air Assess",
+        "description": "Catalog Health (publishing & rights) assessment for a PLMKR artist's catalog.\n\nThe agent scores the ten-dimension Catalog Health Rubric, states the four hard\ngates, answers the Asset-Recovery Frame, classifies rights-infrastructure risk\nseverity, produces a prioritized Action Profile, and routes execution out. It\nidentifies and explains \u2014 it never advises on negotiation, never gives a legal\nopinion, and never builds a financial valuation.\n\nArtist identity is bound from the request payload (artist_name from the catalog\ncontext), NOT from the Playmaker account profile, to prevent account-name vs.\ncredited-artist mismatches.\n\nWhen INK_AND_AIR_MOCK_MODE=true (default), returns a canned scored assessment\nwithout calling the Anthropic API. Set INK_AND_AIR_MOCK_MODE=false with a valid\nANTHROPIC_API_KEY to run a live assessment.",
+        "operationId": "ink_and_air_assess_api_agents_ink_and_air_assess_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InkAndAirAssessRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/royalty-doctor/assess": {
+      "post": {
+        "tags": [
+          "royalty-doctor"
+        ],
+        "summary": "Royalty Doctor Assess",
+        "description": "Royalty Recovery Audit for a PLMKR artist's catalog.\n\nThe agent scores the seven-dimension Royalty Recovery Readiness Rubric, states\nthe four hard gates, classifies recovery posture (leakage severity), produces a\nLeak Map and a prioritized Recovery Plan, and routes execution out. It IDENTIFIES,\nDOCUMENTS, and QUANTIFIES-WHERE-EVIDENCE-SUPPORTS \u2014 it rules out normal pipeline\nlag before claiming loss, never fabricates a recoverable figure, and never renders\na legal opinion.\n\nArtist identity is bound from the request payload (artist_name from the catalog\ncontext), NOT from the Playmaker account profile, to prevent account-name vs.\ncredited-artist mismatches.\n\nWhen ROYALTY_DOCTOR_MOCK_MODE=true (default), returns a canned scored assessment\nwithout calling the Anthropic API. Set ROYALTY_DOCTOR_MOCK_MODE=false with a valid\nANTHROPIC_API_KEY to run a live assessment.",
+        "operationId": "royalty_doctor_assess_api_agents_royalty_doctor_assess_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoyaltyDoctorAssessRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/producer-connect/assess": {
+      "post": {
+        "tags": [
+          "producer-connect"
+        ],
+        "summary": "Producer Connect Assess",
+        "description": "Production Readiness assessment for a PLMKR artist's recording project.\n\nBeat (Production Specialist) scores the eight-dimension Production Readiness\nRubric, states the two hard gates (Dim-4 Technical Quality \u2192 NOT DELIVERABLE,\nDim-6 Delivery & QC \u2192 RELEASE BLOCKED), computes a PROVISIONAL composite and\noutput band, produces a prioritized Action Profile, and routes execution out.\nBeat identifies, scopes, casts, and QC-checks \u2014 it never negotiates a contract,\nprices a placement, splits a composition, or picks the song.\n\nArtist identity is bound from the request payload (artist_name), NOT from the\nPlaymaker account profile, to prevent account-name vs. credited-artist mismatches.\n\nWhen PRODUCER_CONNECT_MOCK_MODE=true (default), returns a canned scored\nassessment without calling the Anthropic API. Set PRODUCER_CONNECT_MOCK_MODE=false\nwith a valid ANTHROPIC_API_KEY to run a live assessment.",
+        "operationId": "producer_connect_assess_api_agents_producer_connect_assess_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProducerConnectAssessRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/bank/consult": {
+      "post": {
+        "tags": [
+          "knowledge-bank"
+        ],
+        "summary": "Bank Consult",
+        "description": "Shared knowledge-bank consultation \u2014 lets ANY agent (paired or unpaired) pull\nassembled expert knowledge from ANY of the 9 domains.\n\nPaired agents (the 9 with a home domain) get their home domain by default plus\nany query keyword matches; unpaired agents (e.g. merch-empire) get pure query\nmatches. The bank is PURELY deterministic \u2014 no Anthropic/LLM call is made.\n\nWhen BANK_CONSULT_MOCK_MODE=true (default), the route returns the deterministic\nconsult result directly. The flag exists only to mirror the assess-route shape;\nthere is no live-LLM branch because retrieval needs none.",
+        "operationId": "bank_consult_api_bank_consult_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BankConsultRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
     "schemas": {
+      "ArScoutArtistInput": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "genre": {
+            "type": "string",
+            "title": "Genre"
+          },
+          "stage": {
+            "type": "string",
+            "title": "Stage",
+            "default": "emerging"
+          },
+          "territory": {
+            "type": "string",
+            "title": "Territory",
+            "default": "unknown"
+          },
+          "monthly_listeners": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Monthly Listeners"
+          },
+          "save_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Save Rate"
+          },
+          "release_count": {
+            "type": "integer",
+            "title": "Release Count",
+            "default": 0
+          },
+          "manager": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manager"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "genre"
+        ],
+        "title": "ArScoutArtistInput",
+        "description": "Artist-level fields for the assessment. Name is taken from release/track\nmetadata, NOT from the Playmaker account profile, to prevent account-name\nvs. credited-artist mismatches."
+      },
+      "ArScoutAssessRequest": {
+        "properties": {
+          "artist_id": {
+            "type": "string",
+            "title": "Artist Id",
+            "default": ""
+          },
+          "artist": {
+            "$ref": "#/components/schemas/ArScoutArtistInput"
+          },
+          "track": {
+            "$ref": "#/components/schemas/ArScoutTrackInput"
+          },
+          "evaluation_stage": {
+            "type": "string",
+            "title": "Evaluation Stage",
+            "default": "watching"
+          },
+          "additional_notes": {
+            "type": "string",
+            "title": "Additional Notes",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "artist",
+          "track"
+        ],
+        "title": "ArScoutAssessRequest"
+      },
+      "ArScoutTrackInput": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "bpm": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bpm"
+          },
+          "duration_sec": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Sec"
+          },
+          "lufs": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lufs"
+          },
+          "intro_length_sec": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Intro Length Sec"
+          },
+          "genre": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Genre"
+          },
+          "features": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Features",
+            "default": []
+          },
+          "release_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Date"
+          }
+        },
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "title": "ArScoutTrackInput"
+      },
       "ArtistProfile": {
         "properties": {
           "artist_id": {
@@ -3660,6 +5090,25 @@
           "audio_chunks"
         ],
         "title": "AvatarTalkRequest"
+      },
+      "BankConsultRequest": {
+        "properties": {
+          "agent": {
+            "type": "string",
+            "title": "Agent"
+          },
+          "query": {
+            "type": "string",
+            "title": "Query"
+          }
+        },
+        "type": "object",
+        "required": [
+          "agent",
+          "query"
+        ],
+        "title": "BankConsultRequest",
+        "description": "Request body for the shared knowledge-bank consult route."
       },
       "BatchBookingRequest": {
         "properties": {
@@ -4121,6 +5570,366 @@
         "type": "object",
         "title": "BookingInquiryPatch"
       },
+      "BrandConnectArtistInput": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "genre": {
+            "type": "string",
+            "title": "Genre"
+          },
+          "stage": {
+            "type": "string",
+            "title": "Stage",
+            "default": "emerging"
+          },
+          "territory": {
+            "type": "string",
+            "title": "Territory",
+            "default": "unknown"
+          },
+          "tier": {
+            "type": "string",
+            "title": "Tier",
+            "default": "GOLD"
+          },
+          "monthly_listeners": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Monthly Listeners"
+          },
+          "social_following": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Social Following"
+          },
+          "engagement_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Engagement Rate"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "genre"
+        ],
+        "title": "BrandConnectArtistInput",
+        "description": "Artist-level fields for the brand partnership assessment. Name is taken\nfrom release/track metadata, NOT from the Playmaker account profile."
+      },
+      "BrandConnectAssessRequest": {
+        "properties": {
+          "artist_id": {
+            "type": "string",
+            "title": "Artist Id",
+            "default": ""
+          },
+          "artist": {
+            "$ref": "#/components/schemas/BrandConnectArtistInput"
+          },
+          "deal": {
+            "$ref": "#/components/schemas/BrandConnectDealInput"
+          },
+          "additional_notes": {
+            "type": "string",
+            "title": "Additional Notes",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "artist",
+          "deal"
+        ],
+        "title": "BrandConnectAssessRequest"
+      },
+      "BrandConnectDealInput": {
+        "properties": {
+          "deal_type": {
+            "type": "string",
+            "title": "Deal Type",
+            "default": "paid_social"
+          },
+          "partner_category": {
+            "type": "string",
+            "title": "Partner Category",
+            "default": "consumer_brand"
+          },
+          "exclusivity_category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exclusivity Category"
+          },
+          "term_months": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Term Months"
+          },
+          "has_kill_fee": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Has Kill Fee"
+          },
+          "upfront_payment_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upfront Payment Pct"
+          },
+          "diligence_status": {
+            "type": "string",
+            "title": "Diligence Status",
+            "default": "none"
+          },
+          "prior_artist_deals": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prior Artist Deals"
+          },
+          "has_morality_clause": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Has Morality Clause"
+          },
+          "morality_clause_scoped": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Morality Clause Scoped"
+          }
+        },
+        "type": "object",
+        "title": "BrandConnectDealInput"
+      },
+      "CatalogRightsInput": {
+        "properties": {
+          "catalog_name": {
+            "type": "string",
+            "title": "Catalog Name",
+            "default": ""
+          },
+          "work_count": {
+            "type": "integer",
+            "title": "Work Count",
+            "default": 0
+          },
+          "has_international_usage": {
+            "type": "boolean",
+            "title": "Has International Usage",
+            "default": false
+          },
+          "pro_registration_complete": {
+            "type": "boolean",
+            "title": "Pro Registration Complete",
+            "default": false
+          },
+          "mechanical_registration_complete": {
+            "type": "boolean",
+            "title": "Mechanical Registration Complete",
+            "default": false
+          },
+          "new_works_registered_before_release": {
+            "type": "boolean",
+            "title": "New Works Registered Before Release",
+            "default": false
+          },
+          "active_income_streams": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Active Income Streams",
+            "default": []
+          },
+          "ugc_monetization_active": {
+            "type": "boolean",
+            "title": "Ugc Monetization Active",
+            "default": false
+          },
+          "neighboring_rights_registered": {
+            "type": "boolean",
+            "title": "Neighboring Rights Registered",
+            "default": false
+          },
+          "mlc_unmatched_claims_filed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mlc Unmatched Claims Filed"
+          },
+          "black_box_claim_strategy": {
+            "type": "boolean",
+            "title": "Black Box Claim Strategy",
+            "default": false
+          },
+          "iswc_coverage_complete": {
+            "type": "boolean",
+            "title": "Iswc Coverage Complete",
+            "default": false
+          },
+          "ipi_registered_all_parties": {
+            "type": "boolean",
+            "title": "Ipi Registered All Parties",
+            "default": false
+          },
+          "active_revenue_without_identifiers": {
+            "type": "boolean",
+            "title": "Active Revenue Without Identifiers",
+            "default": false
+          },
+          "split_sheets_executed": {
+            "type": "boolean",
+            "title": "Split Sheets Executed",
+            "default": false
+          },
+          "chain_of_title_documented": {
+            "type": "boolean",
+            "title": "Chain Of Title Documented",
+            "default": false
+          },
+          "active_ownership_dispute": {
+            "type": "boolean",
+            "title": "Active Ownership Dispute",
+            "default": false
+          },
+          "one_stop_clearance": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "One Stop Clearance"
+          },
+          "sync_rep_in_place": {
+            "type": "boolean",
+            "title": "Sync Rep In Place",
+            "default": false
+          },
+          "master_rights_clear": {
+            "type": "boolean",
+            "title": "Master Rights Clear",
+            "default": false
+          },
+          "subpublishing_in_major_territories": {
+            "type": "boolean",
+            "title": "Subpublishing In Major Territories",
+            "default": false
+          },
+          "territories_collecting_count": {
+            "type": "integer",
+            "title": "Territories Collecting Count",
+            "default": 0
+          },
+          "statement_matching_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statement Matching Rate"
+          },
+          "audit_window_status": {
+            "type": "string",
+            "title": "Audit Window Status",
+            "default": "unknown"
+          },
+          "last_audit_within_window": {
+            "type": "boolean",
+            "title": "Last Audit Within Window",
+            "default": false
+          },
+          "active_litigation": {
+            "type": "boolean",
+            "title": "Active Litigation",
+            "default": false
+          },
+          "uncleared_sample_exposure": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uncleared Sample Exposure"
+          }
+        },
+        "type": "object",
+        "title": "CatalogRightsInput",
+        "description": "Structured description of the catalog / work under review.\n\nThe agent scores what is PRESENT and flags what is ABSENT \u2014 absence of a\nrequired step (a registration, an executed split sheet, a filed claim) is\nitself evaluable as a gap. These flags describe the catalog's rights state;\nthey are not a valuation and not a legal opinion."
+      },
       "ChatStreamRequest": {
         "properties": {
           "agent_id": {
@@ -4351,6 +6160,34 @@
         "type": "object",
         "title": "CuratorPatch"
       },
+      "DeviceRegisterRequest": {
+        "properties": {
+          "artist_id": {
+            "type": "string",
+            "title": "Artist Id"
+          },
+          "platform": {
+            "type": "string",
+            "title": "Platform"
+          },
+          "token": {
+            "type": "string",
+            "title": "Token"
+          },
+          "app_version": {
+            "type": "string",
+            "title": "App Version",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "artist_id",
+          "platform",
+          "token"
+        ],
+        "title": "DeviceRegisterRequest"
+      },
       "GenerateBookingRequest": {
         "properties": {
           "artist_id": {
@@ -4487,6 +6324,194 @@
         ],
         "title": "GenerateReportRequest"
       },
+      "GridProphetArtistInput": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "genre": {
+            "type": "string",
+            "title": "Genre"
+          },
+          "stage": {
+            "type": "string",
+            "title": "Stage",
+            "default": "emerging"
+          },
+          "territory": {
+            "type": "string",
+            "title": "Territory",
+            "default": "unknown"
+          },
+          "monthly_listeners": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Monthly Listeners"
+          },
+          "social_following": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Social Following"
+          },
+          "save_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Save Rate"
+          },
+          "release_count": {
+            "type": "integer",
+            "title": "Release Count",
+            "default": 0
+          },
+          "has_email_list": {
+            "type": "boolean",
+            "title": "Has Email List",
+            "default": false
+          },
+          "email_list_size": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email List Size"
+          },
+          "has_merch": {
+            "type": "boolean",
+            "title": "Has Merch",
+            "default": false
+          },
+          "prior_editorial_placements": {
+            "type": "integer",
+            "title": "Prior Editorial Placements",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "genre"
+        ],
+        "title": "GridProphetArtistInput",
+        "description": "Artist-level fields for the marketing assessment. Name is taken from\nrelease/track metadata, NOT from the Playmaker account profile."
+      },
+      "GridProphetAssessRequest": {
+        "properties": {
+          "artist_id": {
+            "type": "string",
+            "title": "Artist Id",
+            "default": ""
+          },
+          "artist": {
+            "$ref": "#/components/schemas/GridProphetArtistInput"
+          },
+          "campaign": {
+            "$ref": "#/components/schemas/GridProphetCampaignInput"
+          },
+          "additional_notes": {
+            "type": "string",
+            "title": "Additional Notes",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "artist",
+          "campaign"
+        ],
+        "title": "GridProphetAssessRequest"
+      },
+      "GridProphetCampaignInput": {
+        "properties": {
+          "release_title": {
+            "type": "string",
+            "title": "Release Title"
+          },
+          "release_date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Date"
+          },
+          "campaign_budget_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Campaign Budget Usd"
+          },
+          "campaign_window_weeks": {
+            "type": "integer",
+            "title": "Campaign Window Weeks",
+            "default": 12
+          },
+          "primary_platforms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Primary Platforms",
+            "default": []
+          },
+          "has_tour_dates": {
+            "type": "boolean",
+            "title": "Has Tour Dates",
+            "default": false
+          },
+          "tour_territory": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tour Territory"
+          },
+          "is_catalog_campaign": {
+            "type": "boolean",
+            "title": "Is Catalog Campaign",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "release_title"
+        ],
+        "title": "GridProphetCampaignInput"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -4499,6 +6524,306 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "IAPValidateRequest": {
+        "properties": {
+          "artist_id": {
+            "type": "string",
+            "title": "Artist Id"
+          },
+          "receipt_data": {
+            "type": "string",
+            "title": "Receipt Data"
+          },
+          "product_id": {
+            "type": "string",
+            "title": "Product Id"
+          },
+          "transaction_id": {
+            "type": "string",
+            "title": "Transaction Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "artist_id",
+          "receipt_data",
+          "product_id",
+          "transaction_id"
+        ],
+        "title": "IAPValidateRequest"
+      },
+      "InkAndAirAssessRequest": {
+        "properties": {
+          "artist_id": {
+            "type": "string",
+            "title": "Artist Id",
+            "default": ""
+          },
+          "artist_name": {
+            "type": "string",
+            "title": "Artist Name"
+          },
+          "artist_territory": {
+            "type": "string",
+            "title": "Artist Territory",
+            "default": "unknown"
+          },
+          "catalog": {
+            "$ref": "#/components/schemas/CatalogRightsInput"
+          },
+          "additional_notes": {
+            "type": "string",
+            "title": "Additional Notes",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "artist_name",
+          "catalog"
+        ],
+        "title": "InkAndAirAssessRequest"
+      },
+      "LexCipherAgreementInput": {
+        "properties": {
+          "agreement_type": {
+            "type": "string",
+            "title": "Agreement Type",
+            "default": "unknown"
+          },
+          "parties_described": {
+            "type": "string",
+            "title": "Parties Described",
+            "default": ""
+          },
+          "governing_territory": {
+            "type": "string",
+            "title": "Governing Territory",
+            "default": "unknown"
+          },
+          "has_rights_grant": {
+            "type": "boolean",
+            "title": "Has Rights Grant",
+            "default": false
+          },
+          "rights_grant_defined": {
+            "type": "boolean",
+            "title": "Rights Grant Defined",
+            "default": false
+          },
+          "reserved_rights_stated": {
+            "type": "boolean",
+            "title": "Reserved Rights Stated",
+            "default": false
+          },
+          "compensation_defined": {
+            "type": "boolean",
+            "title": "Compensation Defined",
+            "default": false
+          },
+          "royalty_base": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Royalty Base"
+          },
+          "deductions_defined": {
+            "type": "boolean",
+            "title": "Deductions Defined",
+            "default": false
+          },
+          "accounting_period_defined": {
+            "type": "boolean",
+            "title": "Accounting Period Defined",
+            "default": false
+          },
+          "recoupable_costs_enumerated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recoupable Costs Enumerated"
+          },
+          "cross_collateralization": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cross Collateralization"
+          },
+          "has_termination_for_cause": {
+            "type": "boolean",
+            "title": "Has Termination For Cause",
+            "default": false
+          },
+          "has_reversion_clause": {
+            "type": "boolean",
+            "title": "Has Reversion Clause",
+            "default": false
+          },
+          "perpetual_term": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Perpetual Term"
+          },
+          "has_audit_rights": {
+            "type": "boolean",
+            "title": "Has Audit Rights",
+            "default": false
+          },
+          "audit_window_months": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Audit Window Months"
+          },
+          "has_ip_ownership_warranty": {
+            "type": "boolean",
+            "title": "Has Ip Ownership Warranty",
+            "default": false
+          },
+          "has_indemnification": {
+            "type": "boolean",
+            "title": "Has Indemnification",
+            "default": false
+          },
+          "governing_law_stated": {
+            "type": "boolean",
+            "title": "Governing Law Stated",
+            "default": false
+          },
+          "dispute_forum_defined": {
+            "type": "boolean",
+            "title": "Dispute Forum Defined",
+            "default": false
+          },
+          "red_flag_clauses": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Red Flag Clauses",
+            "default": []
+          }
+        },
+        "type": "object",
+        "title": "LexCipherAgreementInput",
+        "description": "Structured description of the agreement under review.\n\nThe agent reviews what is PRESENT and flags what is ABSENT \u2014 absence of a\nrequired provision is itself evaluable as a gap. These flags describe the\ndocument's structure; they are not legal conclusions."
+      },
+      "LexCipherAssessRequest": {
+        "properties": {
+          "artist_id": {
+            "type": "string",
+            "title": "Artist Id",
+            "default": ""
+          },
+          "artist_name": {
+            "type": "string",
+            "title": "Artist Name"
+          },
+          "artist_territory": {
+            "type": "string",
+            "title": "Artist Territory",
+            "default": "unknown"
+          },
+          "agreement": {
+            "$ref": "#/components/schemas/LexCipherAgreementInput"
+          },
+          "additional_notes": {
+            "type": "string",
+            "title": "Additional Notes",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "artist_name",
+          "agreement"
+        ],
+        "title": "LexCipherAssessRequest"
+      },
+      "NotificationSendRequest": {
+        "properties": {
+          "artist_id": {
+            "type": "string",
+            "title": "Artist Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "body": {
+            "type": "string",
+            "title": "Body"
+          },
+          "data": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Data",
+            "default": {}
+          }
+        },
+        "type": "object",
+        "required": [
+          "artist_id",
+          "title",
+          "body"
+        ],
+        "title": "NotificationSendRequest"
+      },
+      "OperationRequest": {
+        "properties": {
+          "artist_id": {
+            "type": "string",
+            "title": "Artist Id"
+          },
+          "action_type": {
+            "type": "string",
+            "title": "Action Type"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "title": "Idempotency Key"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Payload"
+          }
+        },
+        "type": "object",
+        "required": [
+          "artist_id",
+          "action_type",
+          "idempotency_key",
+          "payload"
+        ],
+        "title": "OperationRequest"
       },
       "PRContactIn": {
         "properties": {
@@ -4770,6 +7095,281 @@
         "type": "object",
         "title": "PitchPatch"
       },
+      "ProducerConnectAssessRequest": {
+        "properties": {
+          "artist_id": {
+            "type": "string",
+            "title": "Artist Id",
+            "default": ""
+          },
+          "artist_name": {
+            "type": "string",
+            "title": "Artist Name"
+          },
+          "artist_territory": {
+            "type": "string",
+            "title": "Artist Territory",
+            "default": "unknown"
+          },
+          "project": {
+            "$ref": "#/components/schemas/ProductionProjectInput"
+          },
+          "additional_notes": {
+            "type": "string",
+            "title": "Additional Notes",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "artist_name",
+          "project"
+        ],
+        "title": "ProducerConnectAssessRequest"
+      },
+      "ProductionProjectInput": {
+        "properties": {
+          "project_name": {
+            "type": "string",
+            "title": "Project Name",
+            "default": ""
+          },
+          "project_scope": {
+            "type": "string",
+            "title": "Project Scope",
+            "default": "single"
+          },
+          "target_format": {
+            "type": "string",
+            "title": "Target Format",
+            "default": "streaming"
+          },
+          "reference_tracks_count": {
+            "type": "integer",
+            "title": "Reference Tracks Count",
+            "default": 0
+          },
+          "creative_brief_signed": {
+            "type": "boolean",
+            "title": "Creative Brief Signed",
+            "default": false
+          },
+          "sonic_target_measurable": {
+            "type": "boolean",
+            "title": "Sonic Target Measurable",
+            "default": false
+          },
+          "producer_selected": {
+            "type": "boolean",
+            "title": "Producer Selected",
+            "default": false
+          },
+          "team_credits_genre_matched": {
+            "type": "boolean",
+            "title": "Team Credits Genre Matched",
+            "default": false
+          },
+          "rates_confirmed_in_writing": {
+            "type": "boolean",
+            "title": "Rates Confirmed In Writing",
+            "default": false
+          },
+          "full_team_locked": {
+            "type": "boolean",
+            "title": "Full Team Locked",
+            "default": false
+          },
+          "demo_exists": {
+            "type": "boolean",
+            "title": "Demo Exists",
+            "default": false
+          },
+          "structure_locked": {
+            "type": "boolean",
+            "title": "Structure Locked",
+            "default": false
+          },
+          "composition_locked": {
+            "type": "boolean",
+            "title": "Composition Locked",
+            "default": false
+          },
+          "mix_stage": {
+            "type": "string",
+            "title": "Mix Stage",
+            "default": "not_started"
+          },
+          "measured_loudness_in_spec": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Measured Loudness In Spec"
+          },
+          "true_peak_in_spec": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "True Peak In Spec"
+          },
+          "format_conforms": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Format Conforms"
+          },
+          "stems_complete": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stems Complete"
+          },
+          "qc_bounced": {
+            "type": "boolean",
+            "title": "Qc Bounced",
+            "default": false
+          },
+          "budget_documented": {
+            "type": "boolean",
+            "title": "Budget Documented",
+            "default": false
+          },
+          "phase_allocated": {
+            "type": "boolean",
+            "title": "Phase Allocated",
+            "default": false
+          },
+          "contingency_reserved": {
+            "type": "boolean",
+            "title": "Contingency Reserved",
+            "default": false
+          },
+          "actuals_reconciled": {
+            "type": "boolean",
+            "title": "Actuals Reconciled",
+            "default": false
+          },
+          "stereo_master_present": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stereo Master Present"
+          },
+          "isrc_assigned": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Isrc Assigned"
+          },
+          "core_metadata_complete": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Core Metadata Complete"
+          },
+          "credits_finalized": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credits Finalized"
+          },
+          "schedule_exists": {
+            "type": "boolean",
+            "title": "Schedule Exists",
+            "default": false
+          },
+          "team_availability_confirmed": {
+            "type": "boolean",
+            "title": "Team Availability Confirmed",
+            "default": false
+          },
+          "release_date_buffer_weeks": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Date Buffer Weeks"
+          },
+          "deal_memos_executed": {
+            "type": "boolean",
+            "title": "Deal Memos Executed",
+            "default": false
+          },
+          "master_ownership_assigned": {
+            "type": "boolean",
+            "title": "Master Ownership Assigned",
+            "default": false
+          },
+          "wfh_confirmed_session_players": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wfh Confirmed Session Players"
+          },
+          "cowrite_flagged": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cowrite Flagged"
+          }
+        },
+        "type": "object",
+        "title": "ProductionProjectInput",
+        "description": "Structured description of the recording project under readiness review.\n\nBeat scores the project's PRODUCTION READINESS \u2014 how ready it is to reach a\nrelease-ready, spec-compliant master on schedule and on budget \u2014 across eight\ndimensions. Absence of a required step (a signed brief, a deal memo, a\ncontingency reserve, an embedded identifier) is itself evaluable. These flags\nare a readiness assessment, not a contract, a legal opinion, or a sync valuation."
+      },
       "RegisterTokenRequest": {
         "properties": {
           "artist_id": {
@@ -4787,6 +7387,169 @@
           "push_token"
         ],
         "title": "RegisterTokenRequest"
+      },
+      "RoyaltyCatalogInput": {
+        "properties": {
+          "catalog_name": {
+            "type": "string",
+            "title": "Catalog Name",
+            "default": ""
+          },
+          "work_count": {
+            "type": "integer",
+            "title": "Work Count",
+            "default": 0
+          },
+          "has_international_usage": {
+            "type": "boolean",
+            "title": "Has International Usage",
+            "default": false
+          },
+          "statement_data_available": {
+            "type": "boolean",
+            "title": "Statement Data Available",
+            "default": false
+          },
+          "registration_export_available": {
+            "type": "boolean",
+            "title": "Registration Export Available",
+            "default": false
+          },
+          "pro_registration_complete": {
+            "type": "boolean",
+            "title": "Pro Registration Complete",
+            "default": false
+          },
+          "mechanical_registration_complete": {
+            "type": "boolean",
+            "title": "Mechanical Registration Complete",
+            "default": false
+          },
+          "neighboring_rights_registered": {
+            "type": "boolean",
+            "title": "Neighboring Rights Registered",
+            "default": false
+          },
+          "identifiers_complete": {
+            "type": "boolean",
+            "title": "Identifiers Complete",
+            "default": false
+          },
+          "active_revenue_without_identifiers": {
+            "type": "boolean",
+            "title": "Active Revenue Without Identifiers",
+            "default": false
+          },
+          "statements_verified_against_dsp": {
+            "type": "boolean",
+            "title": "Statements Verified Against Dsp",
+            "default": false
+          },
+          "anomaly_review_practiced": {
+            "type": "boolean",
+            "title": "Anomaly Review Practiced",
+            "default": false
+          },
+          "reserve_deductions_reviewed": {
+            "type": "boolean",
+            "title": "Reserve Deductions Reviewed",
+            "default": false
+          },
+          "unmatched_pool_claims_filed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unmatched Pool Claims Filed"
+          },
+          "black_box_program_active": {
+            "type": "boolean",
+            "title": "Black Box Program Active",
+            "default": false
+          },
+          "proof_of_ownership_ready": {
+            "type": "boolean",
+            "title": "Proof Of Ownership Ready",
+            "default": false
+          },
+          "active_income_streams": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Active Income Streams",
+            "default": []
+          },
+          "audit_window_status": {
+            "type": "string",
+            "title": "Audit Window Status",
+            "default": "unknown"
+          },
+          "statement_history_retained": {
+            "type": "boolean",
+            "title": "Statement History Retained",
+            "default": false
+          },
+          "soft_audit_practice": {
+            "type": "boolean",
+            "title": "Soft Audit Practice",
+            "default": false
+          },
+          "lag_vs_missing_tracked": {
+            "type": "boolean",
+            "title": "Lag Vs Missing Tracked",
+            "default": false
+          },
+          "chain_of_title_documented": {
+            "type": "boolean",
+            "title": "Chain Of Title Documented",
+            "default": false
+          },
+          "split_sheets_executed": {
+            "type": "boolean",
+            "title": "Split Sheets Executed",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "RoyaltyCatalogInput",
+        "description": "Structured description of the catalog under recovery review.\n\nThe agent scores the catalog's RECOVERY STATE \u2014 how completely it is collecting\nincome it has already earned, and how ready it is to recover what it is not.\nAbsence of a required step (a registration, a filed claim, a verification\npractice) is itself evaluable as a leak point. These flags are not a valuation\nand not a legal opinion."
+      },
+      "RoyaltyDoctorAssessRequest": {
+        "properties": {
+          "artist_id": {
+            "type": "string",
+            "title": "Artist Id",
+            "default": ""
+          },
+          "artist_name": {
+            "type": "string",
+            "title": "Artist Name"
+          },
+          "artist_territory": {
+            "type": "string",
+            "title": "Artist Territory",
+            "default": "unknown"
+          },
+          "catalog": {
+            "$ref": "#/components/schemas/RoyaltyCatalogInput"
+          },
+          "additional_notes": {
+            "type": "string",
+            "title": "Additional Notes",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "artist_name",
+          "catalog"
+        ],
+        "title": "RoyaltyDoctorAssessRequest"
       },
       "SendEmailRequest": {
         "properties": {
@@ -4991,6 +7754,391 @@
         "type": "object",
         "title": "SocialPostPatch"
       },
+      "SyncAgentAssessRequest": {
+        "properties": {
+          "artist_id": {
+            "type": "string",
+            "title": "Artist Id",
+            "default": ""
+          },
+          "artist_name": {
+            "type": "string",
+            "title": "Artist Name"
+          },
+          "artist_territory": {
+            "type": "string",
+            "title": "Artist Territory",
+            "default": "unknown"
+          },
+          "track": {
+            "$ref": "#/components/schemas/SyncAgentTrackInput"
+          },
+          "brief": {
+            "$ref": "#/components/schemas/SyncAgentBriefInput"
+          },
+          "additional_notes": {
+            "type": "string",
+            "title": "Additional Notes",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "artist_name",
+          "track",
+          "brief"
+        ],
+        "title": "SyncAgentAssessRequest"
+      },
+      "SyncAgentBriefInput": {
+        "properties": {
+          "project_type": {
+            "type": "string",
+            "title": "Project Type",
+            "default": "unknown"
+          },
+          "scene_description": {
+            "type": "string",
+            "title": "Scene Description",
+            "default": ""
+          },
+          "budget_range": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budget Range"
+          },
+          "deadline_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deadline Days"
+          },
+          "territory": {
+            "type": "string",
+            "title": "Territory",
+            "default": "worldwide"
+          },
+          "reference_tracks": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Reference Tracks",
+            "default": []
+          },
+          "lyric_restrictions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Lyric Restrictions",
+            "default": []
+          },
+          "exclusivity_required": {
+            "type": "boolean",
+            "title": "Exclusivity Required",
+            "default": false
+          },
+          "buyer_class": {
+            "type": "string",
+            "title": "Buyer Class",
+            "default": "unknown"
+          }
+        },
+        "type": "object",
+        "title": "SyncAgentBriefInput",
+        "description": "Brief-level fields describing the sync opportunity."
+      },
+      "SyncAgentTrackInput": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "genre": {
+            "type": "string",
+            "title": "Genre"
+          },
+          "clearance_status": {
+            "type": "string",
+            "title": "Clearance Status",
+            "default": "UNKNOWN"
+          },
+          "is_one_stop": {
+            "type": "boolean",
+            "title": "Is One Stop",
+            "default": false
+          },
+          "has_stems": {
+            "type": "boolean",
+            "title": "Has Stems",
+            "default": false
+          },
+          "has_clean_version": {
+            "type": "boolean",
+            "title": "Has Clean Version",
+            "default": true
+          },
+          "duration_sec": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Sec"
+          },
+          "bpm": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bpm"
+          },
+          "has_samples": {
+            "type": "boolean",
+            "title": "Has Samples",
+            "default": false
+          },
+          "has_explicit_lyrics": {
+            "type": "boolean",
+            "title": "Has Explicit Lyrics",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "title",
+          "genre"
+        ],
+        "title": "SyncAgentTrackInput",
+        "description": "Track-level fields for the sync licensing assessment."
+      },
+      "TourCampaignInput": {
+        "properties": {
+          "campaign_name": {
+            "type": "string",
+            "title": "Campaign Name",
+            "default": ""
+          },
+          "tour_type": {
+            "type": "string",
+            "title": "Tour Type",
+            "default": "headline"
+          },
+          "markets_count": {
+            "type": "integer",
+            "title": "Markets Count",
+            "default": 0
+          },
+          "has_international_dates": {
+            "type": "boolean",
+            "title": "Has International Dates",
+            "default": false
+          },
+          "anchor_dates_confirmed": {
+            "type": "boolean",
+            "title": "Anchor Dates Confirmed",
+            "default": false
+          },
+          "routing_efficiency_ratio": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Routing Efficiency Ratio"
+          },
+          "dead_legs_analyzed": {
+            "type": "boolean",
+            "title": "Dead Legs Analyzed",
+            "default": false
+          },
+          "break_even_model_exists": {
+            "type": "boolean",
+            "title": "Break Even Model Exists",
+            "default": false
+          },
+          "modeled_before_routing": {
+            "type": "boolean",
+            "title": "Modeled Before Routing",
+            "default": false
+          },
+          "sensitivity_scenarios_modeled": {
+            "type": "boolean",
+            "title": "Sensitivity Scenarios Modeled",
+            "default": false
+          },
+          "offers_evaluated_against_framework": {
+            "type": "boolean",
+            "title": "Offers Evaluated Against Framework",
+            "default": false
+          },
+          "split_points_analyzed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Split Points Analyzed"
+          },
+          "red_flag_clauses_identified": {
+            "type": "boolean",
+            "title": "Red Flag Clauses Identified",
+            "default": false
+          },
+          "rider_complete": {
+            "type": "boolean",
+            "title": "Rider Complete",
+            "default": false
+          },
+          "production_advance_completed": {
+            "type": "boolean",
+            "title": "Production Advance Completed",
+            "default": false
+          },
+          "advance_lead_weeks": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Advance Lead Weeks"
+          },
+          "price_points_market_analyzed": {
+            "type": "boolean",
+            "title": "Price Points Market Analyzed",
+            "default": false
+          },
+          "tier_structure_defined": {
+            "type": "boolean",
+            "title": "Tier Structure Defined",
+            "default": false
+          },
+          "secondary_market_monitored": {
+            "type": "boolean",
+            "title": "Secondary Market Monitored",
+            "default": false
+          },
+          "work_permits_confirmed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Work Permits Confirmed"
+          },
+          "withholding_modeled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Withholding Modeled"
+          },
+          "territory_streaming_signal": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Territory Streaming Signal"
+          },
+          "merch_planned": {
+            "type": "boolean",
+            "title": "Merch Planned",
+            "default": false
+          },
+          "hall_fees_documented": {
+            "type": "boolean",
+            "title": "Hall Fees Documented",
+            "default": false
+          },
+          "settlement_review_process": {
+            "type": "boolean",
+            "title": "Settlement Review Process",
+            "default": false
+          },
+          "red_flag_clauses": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Red Flag Clauses",
+            "default": []
+          }
+        },
+        "type": "object",
+        "title": "TourCampaignInput",
+        "description": "Structured description of the tour campaign under review.\n\nThe agent scores what is PRESENT and flags what is ABSENT \u2014 absence of a\nrequired planning step (a break-even model, a confirmed anchor, a production\nadvance) is itself evaluable as a gap. These flags describe the campaign's\nplanning state; they are not predictions of box-office outcome."
+      },
+      "TourCommanderAssessRequest": {
+        "properties": {
+          "artist_id": {
+            "type": "string",
+            "title": "Artist Id",
+            "default": ""
+          },
+          "artist_name": {
+            "type": "string",
+            "title": "Artist Name"
+          },
+          "artist_territory": {
+            "type": "string",
+            "title": "Artist Territory",
+            "default": "unknown"
+          },
+          "campaign": {
+            "$ref": "#/components/schemas/TourCampaignInput"
+          },
+          "additional_notes": {
+            "type": "string",
+            "title": "Additional Notes",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "artist_name",
+          "campaign"
+        ],
+        "title": "TourCommanderAssessRequest"
+      },
       "TtsCancelRequest": {
         "properties": {
           "call_id": {
@@ -5077,6 +8225,24 @@
           "code"
         ],
         "title": "VerifyOtpRequest"
+      },
+      "VersionCheckRequest": {
+        "properties": {
+          "platform": {
+            "type": "string",
+            "title": "Platform"
+          },
+          "current_version": {
+            "type": "string",
+            "title": "Current Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "platform",
+          "current_version"
+        ],
+        "title": "VersionCheckRequest"
       }
     }
   },

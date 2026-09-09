@@ -71,11 +71,13 @@ Sorted alphabetically by path.
 | POST | `/api/notifications/register` | Yes (X-API-Key) | Register Push Token |
 | POST | `/api/notifications/send` | Yes (X-API-Key) | Send Notification |
 | POST | `/api/operations` | Yes (X-API-Key) | Create Operation |
+| GET | `/api/operations/lookup` | Yes (X-API-Key) | Recover Operation |
 | POST | `/api/operations/execute` | Yes (X-API-Key) | Execute Existing Approved Operation |
 | GET | `/api/operations` | Yes (X-API-Key) | List Operations |
 | GET | `/api/operations/{operation_id}` | Yes (X-API-Key) | Get Operation |
 | POST | `/api/operations/{operation_id}/approve` | Yes (X-API-Key) | Approve Operation |
 | POST | `/api/operations/{operation_id}/ready` | Yes (X-API-Key) | Mark Operation Ready |
+| POST | `/api/operations/{operation_id}/cancel` | Yes (X-API-Key) | Cancel Operation |
 | POST | `/api/operations/{operation_id}/execute` | Yes (X-API-Key) | Execute Operation |
 | POST | `/api/operations/{operation_id}/reconcile` | Yes (X-API-Key) | Reconcile Operation |
 | GET | `/api/pitches` | Yes (X-API-Key) | List Pitches |
