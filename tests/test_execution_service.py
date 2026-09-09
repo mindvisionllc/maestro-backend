@@ -67,6 +67,35 @@ def test_create_is_idempotent_and_conflicting_payload_is_rejected(services):
     assert exc.value.detail["code"] == "idempotency_conflict"
 
 
+def test_artist_can_cancel_queued_operation_and_history_is_atomic(services):
+    svc, _, _, _ = services
+    operation, _ = svc._create_or_get_operation(**_gmail_request(key="cancel-queued"))
+    approved = svc.approve_operation(operation["id"], artist_id=operation["artist_id"])
+    ready = svc.mark_operation_ready(approved["id"], artist_id=approved["artist_id"])
+
+    canceled = svc.cancel_operation(ready["id"], artist_id=ready["artist_id"])
+
+    assert canceled["status"] == "canceled"
+    assert canceled["completed_at"]
+    assert [event["event_type"] for event in canceled["events"]][-1] == "artist_canceled"
+    assert canceled["events"][-1]["from_status"] == "pending"
+    assert asyncio.run(svc.execute_operation(canceled["id"], artist_id=canceled["artist_id"]))["status"] == "canceled"
+
+
+def test_cancel_rejects_in_flight_or_unknown_operations(services):
+    svc, _, _, db = services
+    operation, _ = svc._create_or_get_operation(**_gmail_request(key="cancel-guard"))
+    for status in ("executing", "unknown", "succeeded"):
+        conn = sqlite3.connect(str(db))
+        conn.execute("UPDATE execution_operations SET status=? WHERE id=?", (status, operation["id"]))
+        conn.commit()
+        conn.close()
+        with pytest.raises(HTTPException) as exc:
+            svc.cancel_operation(operation["id"], artist_id=operation["artist_id"])
+        assert exc.value.status_code == 409
+        assert exc.value.detail["code"] == "operation_not_cancellable"
+
+
 def test_operation_events_preserve_artist_approval_and_dispatch_history(services, monkeypatch):
     svc, pitch, _, _ = services
 

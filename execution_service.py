@@ -40,7 +40,7 @@ GMAIL_SEND = "gmail.send"
 SOCIAL_SCHEDULE = "social.buffer.schedule"
 SUPPORTED_ACTIONS = {GMAIL_SEND, SOCIAL_SCHEDULE}
 
-TERMINAL_STATUSES = {"succeeded", "failed"}
+TERMINAL_STATUSES = {"succeeded", "failed", "canceled"}
 EXECUTABLE_STATUSES = {"pending", "failed_retryable"}
 RECONCILABLE_STATUSES = {"unknown"}
 
@@ -261,7 +261,7 @@ def _list_operations(
     if limit < 1 or limit > 100:
         raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
     if status is not None and status not in {
-        "pending", "failed_retryable", "executing", "succeeded", "failed", "unknown",
+        "pending", "failed_retryable", "executing", "succeeded", "failed", "unknown", "canceled",
     }:
         raise HTTPException(status_code=422, detail={"code": "invalid_operation_status"})
 
@@ -723,6 +723,66 @@ def mark_operation_ready(operation_id: str, artist_id: Optional[str] = None) -> 
     return _get_operation(operation_id)
 
 
+def cancel_operation(operation_id: str, artist_id: Optional[str] = None) -> dict:
+    """Withdraw queued work before any provider dispatch begins."""
+    operation = _get_operation(operation_id)
+    if not operation:
+        raise HTTPException(status_code=404, detail="Operation not found")
+    _require_operation_owner(operation, artist_id)
+    if operation["status"] not in EXECUTABLE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "operation_not_cancellable",
+                "status": operation["status"],
+                "message": "Only queued operations can be withdrawn before provider dispatch.",
+            },
+        )
+
+    timestamp = _now()
+    conn = sqlite3.connect(str(_DB_PATH), timeout=10)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute(
+            f"SELECT {','.join(_OP_COLS)} FROM execution_operations WHERE id=?",
+            (operation_id,),
+        ).fetchone()
+        if not current:
+            conn.rollback()
+            raise HTTPException(status_code=404, detail="Operation not found")
+        current_operation = _row_to_operation(current)
+        _require_operation_owner(current_operation, artist_id)
+        if current_operation["status"] not in EXECUTABLE_STATUSES:
+            conn.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "operation_not_cancellable",
+                    "status": current_operation["status"],
+                    "message": "Only queued operations can be withdrawn before provider dispatch.",
+                },
+            )
+        conn.execute(
+            """UPDATE execution_operations
+               SET status='canceled', updated_at=?, completed_at=?,
+                   error_code=NULL, error_detail=NULL
+               WHERE id=?""",
+            (timestamp, timestamp, operation_id),
+        )
+        _insert_operation_event(
+            conn, operation_id, current_operation["artist_id"],
+            "artist_canceled", "canceled",
+            from_status=current_operation["status"],
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return _get_operation(operation_id)
+
+
 async def execute_operation(operation_id: str, artist_id: Optional[str] = None) -> dict:
     existing = _get_operation(operation_id)
     if not existing:
@@ -1049,6 +1109,19 @@ def api_mark_operation_ready(
     except ArtistAuthError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return mark_operation_ready(operation_id, artist_id=scoped_artist_id)
+
+
+@router.post("/api/operations/{operation_id}/cancel", tags=["operations"])
+def api_cancel_operation(
+    operation_id: str,
+    artist_id: str,
+    request: Request = None,
+):
+    try:
+        scoped_artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return cancel_operation(operation_id, artist_id=scoped_artist_id)
 
 
 
