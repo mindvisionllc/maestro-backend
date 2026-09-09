@@ -521,11 +521,18 @@ async def _buffer_list_profiles(artist_id: str) -> list[dict]:
     if not access_token:
         raise BufferNotConnected(f"Artist {artist_id} has not connected Buffer")
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-        resp = await client.get(
-            _BUFFER_PROFILES_URL,
-            params={"access_token": access_token},
-        )
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+            resp = await client.get(
+                _BUFFER_PROFILES_URL,
+                params={"access_token": access_token},
+            )
+    except httpx.HTTPError as exc:
+        log.error("buffer_profiles_transport_error", extra={
+            "event": "buffer_profiles_transport_error",
+            "error": type(exc).__name__,
+        })
+        raise RuntimeError("Buffer profile discovery is temporarily unavailable") from exc
 
     if resp.status_code != 200:
         log.error("buffer_profiles_error", extra={
@@ -540,10 +547,25 @@ async def _buffer_list_profiles(artist_id: str) -> list[dict]:
     except Exception:
         raise RuntimeError("Buffer API returned non-JSON profile response")
 
-    if not isinstance(data, list):
+    if not isinstance(data, list) or any(not isinstance(profile, dict) for profile in data):
         raise RuntimeError("Buffer API returned invalid profile response")
 
-    return data
+    profiles = []
+    for profile in data:
+        profile_id = profile.get("id")
+        if not isinstance(profile_id, str) or not profile_id.strip():
+            raise RuntimeError("Buffer API returned invalid profile response")
+        normalized = {"id": profile_id.strip()}
+        for field in (
+            "service", "formatted_username", "service_username", "username",
+            "name", "avatar_url",
+        ):
+            value = profile.get(field)
+            if isinstance(value, str) and value.strip():
+                normalized[field] = value.strip()
+        profiles.append(normalized)
+
+    return profiles
 
 
 @router.get("/api/buffer/profiles", tags=["buffer"])

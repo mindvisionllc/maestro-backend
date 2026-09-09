@@ -92,3 +92,68 @@ def test_buffer_list_profiles_rejects_invalid_shape(monkeypatch):
     with patch("social_service.httpx.AsyncClient", return_value=cm):
         with pytest.raises(RuntimeError, match="invalid profile response"):
             asyncio.run(svc._buffer_list_profiles("artist-1"))
+
+
+def test_buffer_list_profiles_rejects_profile_without_id(monkeypatch):
+    monkeypatch.setattr(
+        svc,
+        "_load_buffer_tokens",
+        lambda artist_id: {"access_token": "token-123"},
+    )
+
+    resp = _mock_response(200, [{"service": "instagram"}])
+    client = MagicMock()
+    client.get = AsyncMock(return_value=resp)
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=client)
+    cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("social_service.httpx.AsyncClient", return_value=cm):
+        with pytest.raises(RuntimeError, match="invalid profile response"):
+            asyncio.run(svc._buffer_list_profiles("artist-1"))
+
+
+def test_buffer_list_profiles_returns_only_safe_profile_fields(monkeypatch):
+    monkeypatch.setattr(
+        svc,
+        "_load_buffer_tokens",
+        lambda artist_id: {"access_token": "token-123"},
+    )
+
+    resp = _mock_response(200, [{
+        "id": " prof-1 ",
+        "service": " instagram ",
+        "formatted_username": " @artist ",
+        "access_token": "should-not-leak",
+        "metadata": {"private": True},
+    }])
+    client = MagicMock()
+    client.get = AsyncMock(return_value=resp)
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=client)
+    cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("social_service.httpx.AsyncClient", return_value=cm):
+        assert asyncio.run(svc._buffer_list_profiles("artist-1")) == [{
+            "id": "prof-1",
+            "service": "instagram",
+            "formatted_username": "@artist",
+        }]
+
+
+def test_buffer_list_profiles_maps_transport_failure_to_runtime_error(monkeypatch):
+    monkeypatch.setattr(
+        svc,
+        "_load_buffer_tokens",
+        lambda artist_id: {"access_token": "token-123"},
+    )
+
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=svc.httpx.ConnectTimeout("timed out"))
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=client)
+    cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("social_service.httpx.AsyncClient", return_value=cm):
+        with pytest.raises(RuntimeError, match="temporarily unavailable"):
+            asyncio.run(svc._buffer_list_profiles("artist-1"))
