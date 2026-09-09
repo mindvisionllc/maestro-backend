@@ -406,6 +406,36 @@ def test_operation_history_route_is_scoped_and_exposes_bounded_contract(services
     assert exc.value.status_code == 422
 
 
+def test_operation_lookup_route_is_scoped_and_rejects_unsupported_actions(services, monkeypatch):
+    svc, _, _, _ = services
+    operation, _ = svc._create_or_get_operation(**_gmail_request(key="route-lookup"))
+
+    def scoped_artist(_request, claimed_artist_id):
+        if claimed_artist_id != "artist-1":
+            from artist_identity import ArtistAuthError
+            raise ArtistAuthError("Artist resource not found")
+        return claimed_artist_id
+
+    monkeypatch.setattr(svc, "require_artist_scope", scoped_artist)
+    recovered = svc.lookup_operation(
+        "artist-1", operation["action_type"], operation["idempotency_key"], request=object(),
+    )
+    assert recovered["id"] == operation["id"]
+
+    with pytest.raises(HTTPException) as exc:
+        svc.lookup_operation("artist-1", "pitch.send", "route-lookup", request=object())
+    assert exc.value.status_code == 422
+    assert exc.value.detail["code"] == "unsupported_action"
+
+    with pytest.raises(HTTPException) as exc:
+        svc.lookup_operation("artist-1", operation["action_type"], "missing", request=object())
+    assert exc.value.status_code == 404
+
+    with pytest.raises(HTTPException) as exc:
+        svc.lookup_operation("artist-2", operation["action_type"], operation["idempotency_key"], request=object())
+    assert exc.value.status_code == 404
+
+
 @pytest.mark.parametrize(
     "action_type",
     ["pitch.send", "pr.send", "booking.send", "social.batch", "release.execute"],

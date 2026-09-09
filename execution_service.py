@@ -1083,6 +1083,16 @@ def lookup_operation(
     except ArtistAuthError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
+    if action_type not in SUPPORTED_ACTIONS:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "unsupported_action",
+                "action_type": action_type,
+                "supported_actions": sorted(SUPPORTED_ACTIONS),
+            },
+        )
+
     operation = _get_operation_by_idempotency(
         scoped_artist_id, action_type, idempotency_key,
     )

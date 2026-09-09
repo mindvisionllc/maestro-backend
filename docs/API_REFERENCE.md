@@ -613,9 +613,17 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 
 - **Summary:** List Operations — return bounded, newest-first durable execution history for the authenticated artist
 - **Auth:** Yes (X-API-Key)
-- **Query params:** `artist_id` (string, required), `limit` (integer, 1–100, default 50), `status` (optional: `pending`, `failed_retryable`, `executing`, `succeeded`, `failed`, or `unknown`)
+- **Query params:** `artist_id` (string, required), `limit` (integer, 1–100, default 50), `status` (optional: `pending`, `failed_retryable`, `executing`, `succeeded`, `failed`, `unknown`, or `canceled`)
 - **Response:** 200 — `{ operations: operation[], limit }`
 - **Security:** `artist_id` is enforced against the authenticated artist session; another artist's history is never returned
+
+#### GET /api/operations/lookup
+
+- **Summary:** Recover Operation — retrieve one artist-owned operation by its action type and durable idempotency key after a client loses its local operation ID
+- **Auth:** Yes (X-API-Key)
+- **Query params:** `artist_id`, `action_type`, and `idempotency_key` (all required)
+- **Response:** 200 — operation object
+- **Failures:** 404 when no matching operation exists or the artist is not authorized; 422 for an unsupported action type
 
 #### POST /api/operations
 
@@ -640,6 +648,15 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 - **Query params:** `artist_id` (string, required)
 - **Response:** 200 — operation object with non-null `approved_at` and `ready_at`
 - **Failures:** 409 when the operation has not been approved or is no longer executable
+
+#### POST /api/operations/{operation_id}/cancel
+
+- **Summary:** Cancel Operation — withdraw an approved or ready operation before provider dispatch while retaining durable history
+- **Auth:** Yes (X-API-Key)
+- **Path params:** `operation_id` (string, required)
+- **Query params:** `artist_id` (string, required)
+- **Response:** 200 — operation object with `status: canceled`
+- **Failures:** 409 once provider dispatch has started or the operation is already terminal
 
 #### POST /api/operations/{operation_id}/execute
 
