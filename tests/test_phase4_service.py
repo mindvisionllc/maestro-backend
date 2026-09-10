@@ -168,11 +168,12 @@ def test_register_device_invalid_token(client):
 
 def test_register_device_duplicate_upserts(p4):
     """Registering the same token twice upserts — no duplicate rows."""
-    p4._db_register_device("artist-dup", "ios", _VALID_TOKEN, "1.0.0")
-    p4._db_register_device("artist-dup", "ios", _VALID_TOKEN, "1.2.0")
+    first = p4._db_register_device("artist-dup", "ios", _VALID_TOKEN, "1.0.0")
+    second = p4._db_register_device("artist-dup", "ios", _VALID_TOKEN, "1.2.0")
     devices = p4._db_list_device_tokens("artist-dup")
     assert len(devices) == 1
     assert devices[0]["app_version"] == "1.2.0"
+    assert second["id"] == first["id"] == devices[0]["id"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

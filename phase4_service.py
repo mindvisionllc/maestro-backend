@@ -84,10 +84,15 @@ def _db_register_device(artist_id: str, platform: str, token: str, app_version: 
                  registered_at=strftime('%Y-%m-%dT%H:%M:%S','now')""",
             (record_id, artist_id, platform, token, app_version),
         )
+        persisted = conn.execute(
+            "SELECT id FROM device_tokens WHERE artist_id=? AND platform=? AND token=?",
+            (artist_id, platform, token),
+        ).fetchone()
         conn.commit()
     finally:
         conn.close()
-    return {"id": record_id, "artist_id": artist_id, "platform": platform,
+    return {"id": persisted[0] if persisted else record_id,
+            "artist_id": artist_id, "platform": platform,
             "token": token, "app_version": app_version}
 
 
