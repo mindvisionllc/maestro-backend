@@ -652,3 +652,18 @@ def test_signed_oauth_state_is_artist_and_provider_bound(identity_client):
 
     with pytest.raises(ArtistAuthError):
         decode_oauth_state(state + "tampered", "gmail")
+
+
+def test_signed_oauth_state_is_consumed_once_and_provider_bound(identity_client):
+    from artist_identity import ArtistAuthError, consume_oauth_state, issue_oauth_state
+
+    artist = login(identity_client, "+1 555 602 0002")
+    state = issue_oauth_state(artist["artist_id"], "buffer")
+
+    assert consume_oauth_state(state, "buffer") == artist["artist_id"]
+    with pytest.raises(ArtistAuthError, match="already used"):
+        consume_oauth_state(state, "buffer")
+
+    other_state = issue_oauth_state(artist["artist_id"], "gmail")
+    with pytest.raises(ArtistAuthError, match="provider"):
+        consume_oauth_state(other_state, "buffer")

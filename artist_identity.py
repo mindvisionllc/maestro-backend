@@ -326,3 +326,82 @@ def decode_oauth_state(state: str, provider: str) -> str:
         raise
     except Exception as exc:
         raise ArtistAuthError("Invalid OAuth state") from exc
+
+
+def _oauth_state_hash(state: str) -> str:
+    return hashlib.sha256(state.encode()).hexdigest()
+
+
+def _sqlite_oauth_state_connection():
+    db_path = Path(os.environ.get("DB_PATH", "/data/memory.db"))
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS used_oauth_states ("
+        "state_hash TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, "
+        "used_at INTEGER NOT NULL)"
+    )
+    return conn
+
+
+def _postgres_oauth_state_connection():
+    import psycopg2
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    with conn.cursor() as cur:
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS used_oauth_states ("
+            "state_hash TEXT PRIMARY KEY, expires_at BIGINT NOT NULL, "
+            "used_at BIGINT NOT NULL)"
+        )
+    conn.commit()
+    return conn
+
+
+def consume_oauth_state(state: str, provider: str) -> str:
+    """Validate and atomically consume a signed OAuth state exactly once."""
+    artist_id = decode_oauth_state(state, provider)
+    now = int(time.time())
+    state_hash = _oauth_state_hash(state)
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    try:
+        if database_url:
+            conn = _postgres_oauth_state_connection()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM used_oauth_states WHERE expires_at <= %s",
+                        (now,),
+                    )
+                    cur.execute(
+                        "INSERT INTO used_oauth_states "
+                        "(state_hash, expires_at, used_at) VALUES (%s, %s, %s) "
+                        "ON CONFLICT (state_hash) DO NOTHING",
+                        (state_hash, now + 600, now),
+                    )
+                    if cur.rowcount != 1:
+                        raise ArtistAuthError("OAuth state already used")
+                conn.commit()
+            finally:
+                conn.close()
+        else:
+            conn = _sqlite_oauth_state_connection()
+            try:
+                conn.execute(
+                    "DELETE FROM used_oauth_states WHERE expires_at <= ?",
+                    (now,),
+                )
+                cursor = conn.execute(
+                    "INSERT OR IGNORE INTO used_oauth_states "
+                    "(state_hash, expires_at, used_at) VALUES (?, ?, ?)",
+                    (state_hash, now + 600, now),
+                )
+                if cursor.rowcount != 1:
+                    raise ArtistAuthError("OAuth state already used")
+                conn.commit()
+            finally:
+                conn.close()
+    except ArtistAuthError:
+        raise
+    except Exception as exc:
+        raise ArtistAuthError("OAuth state consumption unavailable") from exc
+    return artist_id

@@ -11,7 +11,7 @@ Tables always live in SQLite. Buffer tokens stored in artist profile.
 import asyncio
 from artist_identity import (
     ArtistAuthError,
-    decode_oauth_state,
+    consume_oauth_state,
     identity_configured,
     issue_oauth_state,
     require_artist_scope,
@@ -509,7 +509,7 @@ async def buffer_callback(code: str, state: str):
 
     try:
         artist_id = (
-            decode_oauth_state(state, "buffer")
+            consume_oauth_state(state, "buffer")
             if identity_configured()
             else state
         )

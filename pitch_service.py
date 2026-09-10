@@ -11,7 +11,7 @@ Gmail tokens live inside the artist profile (follows main.py Postgres/SQLite rou
 import os
 from artist_identity import (
     ArtistAuthError,
-    decode_oauth_state,
+    consume_oauth_state,
     identity_configured,
     issue_oauth_state,
     require_admin_api_key,
@@ -268,7 +268,7 @@ def gmail_callback(code: str, state: str):
     """Exchange OAuth code using signed artist-bound state."""
     try:
         artist_id = (
-            decode_oauth_state(state, "gmail")
+            consume_oauth_state(state, "gmail")
             if identity_configured()
             else state
         )
