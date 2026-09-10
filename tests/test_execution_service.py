@@ -1254,3 +1254,29 @@ def test_error_details_are_bounded_without_changing_short_recovery_messages():
     bounded = svc._bounded_error_detail("e" * (svc.MAX_ERROR_DETAIL_LENGTH + 100))
     assert len(bounded) == svc.MAX_ERROR_DETAIL_LENGTH
     assert bounded.endswith("… [detail truncated]")
+
+
+def test_operation_event_responses_are_bounded_without_deleting_durable_history(services):
+    svc, _, _, _ = services
+    operation, _ = svc._create_or_get_operation(**_gmail_request(key="bounded-events"))
+    conn = sqlite3.connect(str(svc._DB_PATH))
+    for index in range(svc.MAX_OPERATION_EVENTS + 7):
+        conn.execute(
+            """INSERT INTO execution_operation_events
+               (operation_id, artist_id, event_type, from_status, to_status, metadata, occurred_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                operation["id"], operation["artist_id"], f"event-{index}",
+                "pending", "pending", "{}", f"2026-01-01T00:00:{index:02d}+00:00",
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+    recovered = svc._get_operation(operation["id"])
+
+    assert len(recovered["events"]) == svc.MAX_OPERATION_EVENTS
+    assert recovered["events"][0]["event_type"] == "event-7"
+    assert recovered["events"][-1]["event_type"] == f"event-{svc.MAX_OPERATION_EVENTS + 6}"
+    assert recovered["events_truncated"] is True
+    assert svc._operation_event_count(operation["id"], operation["artist_id"]) == svc.MAX_OPERATION_EVENTS + 8

@@ -52,6 +52,7 @@ MAX_BUFFER_PROFILES = 20
 MAX_OPERATION_PAYLOAD_BYTES = 512 * 1024
 MAX_PROVIDER_RESULT_BYTES = 64 * 1024
 MAX_ERROR_DETAIL_LENGTH = 2048
+MAX_OPERATION_EVENTS = 100
 
 SUPPORTED_SOCIAL_PLATFORMS = {
     "facebook": "facebook",
@@ -216,6 +217,9 @@ def _row_to_operation(row) -> dict:
             operation[key] = None if key in ("provider_result", "profile_binding") else {}
     operation["reconciliation_required"] = operation["status"] in RECONCILABLE_STATUSES
     operation["events"] = _list_operation_events(operation["id"], operation["artist_id"])
+    operation["events_truncated"] = _operation_event_count(
+        operation["id"], operation["artist_id"],
+    ) > len(operation["events"])
     return operation
 
 
@@ -225,12 +229,13 @@ def _list_operation_events(operation_id: str, artist_id: str) -> list[dict]:
         """SELECT event_type, from_status, to_status, metadata, occurred_at
            FROM execution_operation_events
            WHERE operation_id=? AND artist_id=?
-           ORDER BY id ASC""",
-        (operation_id, artist_id),
+           ORDER BY id DESC
+           LIMIT ?""",
+        (operation_id, artist_id, MAX_OPERATION_EVENTS),
     ).fetchall()
     conn.close()
     events = []
-    for event_type, from_status, to_status, metadata, occurred_at in rows:
+    for event_type, from_status, to_status, metadata, occurred_at in reversed(rows):
         try:
             parsed_metadata = json.loads(metadata) if metadata else {}
         except json.JSONDecodeError:
@@ -243,6 +248,18 @@ def _list_operation_events(operation_id: str, artist_id: str) -> list[dict]:
             "occurred_at": occurred_at,
         })
     return events
+
+
+def _operation_event_count(operation_id: str, artist_id: str) -> int:
+    conn = sqlite3.connect(str(_DB_PATH))
+    row = conn.execute(
+        """SELECT COUNT(*)
+           FROM execution_operation_events
+           WHERE operation_id=? AND artist_id=?""",
+        (operation_id, artist_id),
+    ).fetchone()
+    conn.close()
+    return int(row[0]) if row else 0
 
 
 def _record_operation_event(
