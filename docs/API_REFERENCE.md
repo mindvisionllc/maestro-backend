@@ -927,6 +927,7 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 - **Summary:** Tts Cancel — mark a call as ended so any in-flight `/api/tts/synth` for that call returns null
 - **Auth:** Yes (X-API-Key)
 - **Request body:** `call_id` (string, required)
+  - `artist_id` (string, required when artist sessions are enabled)
 - **Response:** 200 — confirmation
 
 #### POST /api/tts/synth
@@ -934,6 +935,7 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 - **Summary:** Tts Synth — synthesize text to base64 WAV; used by app to bypass SSE buffering
 - **Auth:** Yes (X-API-Key)
 - **Request body:**
+  - `artist_id` (string, required when artist sessions are enabled)
   - `text` (string, required)
   - `voice` (string, optional, default `"am_onyx"`)
   - `call_id` (string, optional, default `""`)
@@ -1030,7 +1032,7 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 
 - **Summary:** Avatar Talk — send audio chunks to D-ID avatar for lip-sync video generation
 - **Auth:** Yes (X-API-Key)
-- **Request body:** `agent_id` (string, required), `audio_chunks` (array, required)
+- **Request body:** `artist_id` (string, required when artist sessions are enabled), `agent_id` (string, required), `audio_chunks` (array, required)
 - **Response:** 200 — D-ID talk result with video URL
 
 #### GET /api/avatar/status

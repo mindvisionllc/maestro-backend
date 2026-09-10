@@ -13389,13 +13389,16 @@ class TtsSynthRequest(BaseModel):
     text:    str
     voice:   str = "am_onyx"
     call_id: str = ""
+    artist_id: str = ""
 
 class TtsCancelRequest(BaseModel):
     call_id: str
+    artist_id: str = ""
 
 @app.post("/api/tts/cancel")
-async def tts_cancel(req: TtsCancelRequest):
+async def tts_cancel(req: TtsCancelRequest, request: Request):
     """Mark a call as ended so any in-flight /api/tts/synth for that call returns null."""
+    _require_artist_scope(request, req.artist_id)
     _validate_tts_call_id(req.call_id, required=True)
     _purge_expired_tts_cancellations()
     if req.call_id not in _cancelled_calls and len(_cancelled_calls) >= _TTS_MAX_CANCELLED_CALLS:
@@ -13405,8 +13408,9 @@ async def tts_cancel(req: TtsCancelRequest):
     return {"cancelled": req.call_id}
 
 @app.post("/api/tts/synth")
-async def tts_synth(req: TtsSynthRequest):
+async def tts_synth(req: TtsSynthRequest, request: Request):
     """Synthesize text → base64 WAV. Used by app to bypass SSE buffering."""
+    _require_artist_scope(request, req.artist_id)
     _validate_tts_call_id(req.call_id)
     text = req.text.strip()
     if not text:
@@ -14202,10 +14206,12 @@ class AvatarTalkRequest(BaseModel):
     agent_id: str
     audio_chunks: list  # list of base64 WAV strings
 
+    artist_id: str = ""
 @app.post("/api/avatar/talk")
-async def avatar_talk(payload: AvatarTalkRequest):
+async def avatar_talk(payload: AvatarTalkRequest, request: Request):
     if not D_ID_AVAILABLE:
         raise HTTPException(status_code=503, detail="D-ID not configured — set D_ID_API_KEY")
+    _require_artist_scope(request, payload.artist_id)
     if not payload.audio_chunks:
         raise HTTPException(status_code=400, detail="No audio chunks provided")
 

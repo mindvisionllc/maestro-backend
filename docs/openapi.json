@@ -3069,7 +3069,7 @@
           "phase4"
         ],
         "summary": "Validate Iap Receipt",
-        "description": "In-app purchase receipt validation stub.\nApple receipt validation client is behind IAP_LIVE flag (default false).\nStripe remains the primary billing rail; this is for App Store compliance.",
+        "description": "In-app purchase receipt validation stub.\nApple receipt validation client is behind IAP_LIVE flag (default false).\nStripe remains the primary billing rail; this is for App Store compliance.\n\nUntil an Apple validation client is implemented and exercised, this route\nmust never claim that a receipt is valid. A mocked response is explicitly\nunvalidated so callers cannot treat it as an entitlement.",
         "operationId": "validate_iap_receipt_api_iap_validate_receipt_post",
         "requestBody": {
           "content": {
@@ -5138,6 +5138,11 @@
             "items": {},
             "type": "array",
             "title": "Audio Chunks"
+          },
+          "artist_id": {
+            "type": "string",
+            "title": "Artist Id",
+            "default": ""
           }
         },
         "type": "object",
@@ -6612,14 +6617,20 @@
           },
           "receipt_data": {
             "type": "string",
+            "maxLength": 2000000,
+            "minLength": 1,
             "title": "Receipt Data"
           },
           "product_id": {
             "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
             "title": "Product Id"
           },
           "transaction_id": {
             "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
             "title": "Transaction Id"
           }
         },
@@ -8223,6 +8234,11 @@
           "call_id": {
             "type": "string",
             "title": "Call Id"
+          },
+          "artist_id": {
+            "type": "string",
+            "title": "Artist Id",
+            "default": ""
           }
         },
         "type": "object",
@@ -8245,6 +8261,11 @@
           "call_id": {
             "type": "string",
             "title": "Call Id",
+            "default": ""
+          },
+          "artist_id": {
+            "type": "string",
+            "title": "Artist Id",
             "default": ""
           }
         },
@@ -8313,9 +8334,7 @@
           },
           "current_version": {
             "type": "string",
-            "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)$",
-            "title": "Current Version",
-            "description": "Three-part release version, for example 1.2.0."
+            "title": "Current Version"
           }
         },
         "type": "object",

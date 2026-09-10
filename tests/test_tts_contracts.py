@@ -37,6 +37,30 @@ def test_tts_synth_success_shape(tts_client, monkeypatch):
     assert response.json() == {"audio": "d2F2"}
 
 
+def test_voice_routes_require_artist_scope_when_sessions_are_configured(tts_client, monkeypatch):
+    client, m = tts_client
+    monkeypatch.setattr(m, "identity_configured", lambda: True)
+    monkeypatch.setattr(m, "_authenticated_artist_id", lambda request: "artist-1")
+    monkeypatch.setattr(m, "tts", AsyncMock(return_value=b"wav"))
+
+    missing_artist = client.post(
+        "/api/tts/synth",
+        json={"text": "hello", "voice": "am_onyx", "call_id": "scoped-1"},
+    )
+    assert missing_artist.status_code == 404
+
+    scoped = client.post(
+        "/api/tts/synth",
+        json={"text": "hello", "voice": "am_onyx", "call_id": "scoped-1", "artist_id": "artist-1"},
+    )
+    assert scoped.status_code == 200
+
+    assert client.post("/api/tts/cancel", json={"call_id": "scoped-2"}).status_code == 404
+    assert client.post(
+        "/api/tts/cancel", json={"call_id": "scoped-2", "artist_id": "artist-1"}
+    ).status_code == 200
+
+
 @pytest.mark.parametrize(
     "payload",
     [
