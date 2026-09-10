@@ -512,6 +512,14 @@ def _create_or_get_operation(
     correlation_key = _message_id_for(operation_id) if action_type == GMAIL_SEND else operation_id
     resource_key = payload["post_id"] if action_type == SOCIAL_SCHEDULE else None
     profile_binding = payload.get("buffer_profile_ids") if action_type == SOCIAL_SCHEDULE else None
+    # Reject an existing social post owned by another artist before creating
+    # any durable operation. Missing posts remain deferred to execution-time
+    # validation for legacy recovery flows that materialize posts later.
+    if action_type == SOCIAL_SCHEDULE:
+        post = social_service._db_get_post(resource_key)
+        if post and post.get("artist_id") != artist_id:
+            raise HTTPException(status_code=404, detail="Operation not found")
+
     timestamp = _now()
     encoded_payload = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     if len(encoded_payload.encode("utf-8")) > MAX_OPERATION_PAYLOAD_BYTES:

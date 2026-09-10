@@ -867,12 +867,39 @@ def test_social_resource_conflict_does_not_disclose_other_artist_operation(servi
             payload={"post_id": "post-cross-artist", "buffer_profile_ids": ["profile-1"]},
         )
 
-    assert exc.value.status_code == 409
-    assert exc.value.detail == {
-        "code": "resource_already_has_operation",
-        "message": "This social post is already bound to an execution operation.",
-    }
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "Operation not found"
     assert first["id"] not in str(exc.value.detail)
+    assert svc._get_operation_by_idempotency(
+        "artist-2", "social.buffer.schedule", "artist-two-key",
+    ) == {}
+
+
+def test_social_operation_creation_rejects_existing_post_owned_by_another_artist(services):
+    svc, _, social, db = services
+    social._db_create_post({
+        "id": "post-owned-by-one",
+        "artist_id": "artist-1",
+        "platform": "instagram",
+        "content": "Artist-owned draft",
+        "status": "draft",
+    })
+
+    with pytest.raises(HTTPException) as exc:
+        svc._create_or_get_operation(
+            artist_id="artist-2",
+            action_type="social.buffer.schedule",
+            idempotency_key="cross-artist-create",
+            payload={"post_id": "post-owned-by-one", "buffer_profile_ids": ["profile-1"]},
+        )
+
+    assert exc.value.status_code == 404
+    conn = sqlite3.connect(str(db))
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_operations WHERE artist_id=?",
+        ("artist-2",),
+    ).fetchone()[0] == 0
+    conn.close()
 
 
 def test_operation_owner_mismatch_is_hidden(services):
