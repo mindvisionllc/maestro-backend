@@ -38,6 +38,15 @@ _FCM_SERVER_KEY  = os.environ.get("FCM_SERVER_KEY", "")
 
 _IAP_LIVE        = os.environ.get("IAP_LIVE", "false").lower() == "true"
 
+# Bound values before they are persisted or handed to a notification provider.
+# These are application safety limits, not provider-specific limits.
+MAX_ARTIST_ID_LENGTH = 256
+MAX_DEVICE_TOKEN_LENGTH = 4096
+MAX_APP_VERSION_LENGTH = 32
+MAX_NOTIFICATION_TITLE_LENGTH = 200
+MAX_NOTIFICATION_BODY_LENGTH = 4096
+MAX_NOTIFICATION_DATA_BYTES = 16 * 1024
+
 _APP_MIN_VERSION_IOS     = os.environ.get("APP_MIN_VERSION_IOS",     "1.0.0")
 _APP_MIN_VERSION_ANDROID = os.environ.get("APP_MIN_VERSION_ANDROID", "1.0.0")
 _APP_CURRENT_VERSION     = os.environ.get("APP_CURRENT_VERSION",     "1.0.0")
@@ -178,22 +187,56 @@ class DeviceUnregisterRequest(BaseModel):
     token: str
 
 
+def _bounded_text(value, field: str, maximum: int, *, required: bool = True) -> str:
+    if not isinstance(value, str):
+        raise HTTPException(status_code=422, detail=f"{field} must be a string")
+    normalized = value.strip()
+    if required and not normalized:
+        raise HTTPException(status_code=422, detail=f"{field} is required")
+    if len(normalized) > maximum:
+        raise HTTPException(status_code=422, detail={"code": "field_too_long", "field": field, "max_length": maximum})
+    return normalized
+
+
+def _normalize_device_request(artist_id: str, platform: str, token: str, app_version: str = ""):
+    normalized_platform = _bounded_text(platform, "platform", 16).lower()
+    if normalized_platform not in ("ios", "android"):
+        raise HTTPException(status_code=400, detail="platform must be 'ios' or 'android'")
+    normalized_token = _bounded_text(token, "token", MAX_DEVICE_TOKEN_LENGTH)
+    if len(normalized_token) < 8:
+        raise HTTPException(status_code=400, detail="Invalid device token")
+    normalized_artist_id = _bounded_text(artist_id, "artist_id", MAX_ARTIST_ID_LENGTH)
+    normalized_app_version = _bounded_text(app_version, "app_version", MAX_APP_VERSION_LENGTH, required=False)
+    return normalized_artist_id, normalized_platform, normalized_token, normalized_app_version
+
+
+def _normalize_notification_request(req: "NotificationSendRequest"):
+    artist_id = _bounded_text(req.artist_id, "artist_id", MAX_ARTIST_ID_LENGTH)
+    title = _bounded_text(req.title, "title", MAX_NOTIFICATION_TITLE_LENGTH)
+    body = _bounded_text(req.body, "body", MAX_NOTIFICATION_BODY_LENGTH)
+    if not isinstance(req.data, dict):
+        raise HTTPException(status_code=422, detail="data must be an object")
+    try:
+        data_bytes = len(json.dumps(req.data, separators=(",", ":")).encode("utf-8"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="data must be JSON-serializable") from exc
+    if data_bytes > MAX_NOTIFICATION_DATA_BYTES:
+        raise HTTPException(status_code=422, detail={"code": "payload_too_large", "field": "data", "max_bytes": MAX_NOTIFICATION_DATA_BYTES})
+    return artist_id, title, body, req.data
+
+
 @router.post("/api/devices/register", status_code=201, tags=["phase4"])
 def register_device(req: DeviceRegisterRequest, request: Request = None):
     """Register an iOS or Android device token for push notifications."""
     try:
-        req.artist_id = require_artist_scope(request, req.artist_id)
+        scoped_artist_id = require_artist_scope(request, req.artist_id)
     except ArtistAuthError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    platform = req.platform.lower()
-    if platform not in ("ios", "android"):
-        raise HTTPException(status_code=400, detail="platform must be 'ios' or 'android'")
-    if not req.token or len(req.token) < 8:
-        raise HTTPException(status_code=400, detail="Invalid device token")
-    record = _db_register_device(req.artist_id, platform, req.token, req.app_version)
+    artist_id, platform, token, app_version = _normalize_device_request(scoped_artist_id, req.platform, req.token, req.app_version)
+    record = _db_register_device(artist_id, platform, token, app_version)
     log.info("device_registered", extra={
-        "event": "device_registered", "artist_id": req.artist_id,
-        "platform": platform, "app_version": req.app_version,
+        "event": "device_registered", "artist_id": artist_id,
+        "platform": platform, "app_version": app_version,
     })
     return _public_device_record(record)
 
@@ -215,16 +258,12 @@ def unregister_device(req: DeviceUnregisterRequest, request: Request = None):
         artist_id = require_artist_scope(request, req.artist_id)
     except ArtistAuthError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    platform = req.platform.lower()
-    if platform not in ("ios", "android"):
-        raise HTTPException(status_code=400, detail="platform must be 'ios' or 'android'")
-    if not req.token or len(req.token) < 8:
-        raise HTTPException(status_code=400, detail="Invalid device token")
+    artist_id, platform, token, _ = _normalize_device_request(artist_id, req.platform, req.token)
     conn = sqlite3.connect(str(_DB_PATH))
     try:
         cursor = conn.execute(
             "DELETE FROM device_tokens WHERE artist_id=? AND platform=? AND token=?",
-            (artist_id, platform, req.token),
+            (artist_id, platform, token),
         )
         conn.commit()
         removed = cursor.rowcount
@@ -251,10 +290,13 @@ async def push_send(req: NotificationSendRequest, request: Request = None):
     APNs and FCM clients are stubs behind APNS_LIVE / FCM_LIVE flags (default false).
     """
     try:
-        req.artist_id = require_artist_scope(request, req.artist_id)
+        scoped_artist_id = require_artist_scope(request, req.artist_id)
     except ArtistAuthError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    devices = _db_list_device_tokens(req.artist_id)
+    artist_id, title, body, data = _normalize_notification_request(req)
+    if artist_id != scoped_artist_id:
+        raise HTTPException(status_code=404, detail="Artist identity mismatch")
+    devices = _db_list_device_tokens(scoped_artist_id)
     if not devices:
         return {"sent": 0, "errors": [], "note": "no registered devices"}
 
@@ -262,9 +304,9 @@ async def push_send(req: NotificationSendRequest, request: Request = None):
     for device in devices:
         try:
             if device["platform"] == "ios":
-                r = await _send_apns(device["token"], req.title, req.body, req.data)
+                r = await _send_apns(device["token"], title, body, data)
             else:
-                r = await _send_fcm(device["token"], req.title, req.body, req.data)
+                r = await _send_fcm(device["token"], title, body, data)
             results["results"].append(r)
             results["sent"] += 1
         except Exception:
@@ -273,7 +315,7 @@ async def push_send(req: NotificationSendRequest, request: Request = None):
             results["errors"].append(f"{device['platform']}: delivery failed")
 
     log.info("notification_sent", extra={
-        "event": "notification_sent", "artist_id": req.artist_id,
+        "event": "notification_sent", "artist_id": scoped_artist_id,
         "sent": results["sent"], "errors": len(results["errors"]),
     })
     return results

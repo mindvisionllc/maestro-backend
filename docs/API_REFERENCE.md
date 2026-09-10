@@ -1047,7 +1047,7 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 
 - **Summary:** Register Device — register an iOS or Android device token for push notifications
 - **Auth:** Yes (X-API-Key)
-- **Request body:** `artist_id` (string, required), `platform` ("ios"|"android", required), `token` (string, min 8 chars, required), `app_version` (string, optional)
+- **Request body:** `artist_id` (string, required, max 256 chars), `platform` ("ios"|"android", required), `token` (string, 8–4096 chars, required), `app_version` (string, optional, max 32 chars)
 - **Response:** 201 — `{ id, artist_id, platform, app_version, registered_at, token_registered }`; the reusable device token is never returned
 - **Notes:** Idempotent — duplicate (artist_id, platform, token) tuples upsert rather than error; `app_version` updated on re-register
 
@@ -1069,7 +1069,7 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 
 - **Summary:** Push Send — send push notification to all registered devices for an artist (internal)
 - **Auth:** Yes (X-API-Key)
-- **Request body:** `artist_id` (string, required), `title` (string, required), `body` (string, required), `data` (object, optional, default `{}`)
+- **Request body:** `artist_id` (string, required, max 256 chars), `title` (string, required, max 200 chars), `body` (string, required, max 4096 chars), `data` (object, optional, max 16 KiB serialized, default `{}`)
 - **Response:** 200 — `{ sent: int, errors: [...], results: [...] }`; response errors contain only the platform and a generic delivery-failed message
 - **Notes:** APNs (iOS) and FCM (Android) clients are stubs behind `APNS_LIVE` / `FCM_LIVE` feature flags (default false); returns `mocked: true` until flags are enabled. Device tokens and provider error text are never returned or logged.
 

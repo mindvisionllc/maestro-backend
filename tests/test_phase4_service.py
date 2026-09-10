@@ -80,6 +80,22 @@ _HEADERS = {"X-API-Key": "test-key"}
 _VALID_TOKEN = "abc1234567890abc"
 
 
+@pytest.mark.parametrize("field, size", [("title", 201), ("body", 4097)])
+def test_push_send_rejects_oversized_text(client, field, size):
+    payload = {"artist_id": "artist-push-bounds", "title": "Test", "body": "Push body"}
+    payload[field] = "x" * size
+    response = client.post("/api/push/send", json=payload, headers=_HEADERS)
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "field_too_long"
+    assert response.json()["detail"]["field"] == field
+
+
+def test_push_send_rejects_oversized_data_before_dispatch(client):
+    response = client.post("/api/push/send", json={"artist_id": "artist-push-data-bounds", "title": "Test", "body": "Push body", "data": {"payload": "x" * (16 * 1024)}}, headers=_HEADERS)
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "payload_too_large"
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Device registration
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -164,6 +180,17 @@ def test_register_device_invalid_token(client):
         "token": "short",
     }, headers=_HEADERS)
     assert r.status_code == 400
+
+
+@pytest.mark.parametrize("field", ["artist_id", "platform", "token", "app_version"])
+def test_register_device_rejects_oversized_fields(client, field):
+    payload = {"artist_id": "artist-001", "platform": "ios", "token": _VALID_TOKEN, "app_version": "1.2.0"}
+    limits = {"artist_id": 256, "platform": 16, "token": 4096, "app_version": 32}
+    payload[field] = "x" * (limits[field] + 1)
+    response = client.post("/api/devices/register", json=payload, headers=_HEADERS)
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "field_too_long"
+    assert response.json()["detail"]["field"] == field
 
 
 def test_register_device_duplicate_upserts(p4):
