@@ -435,6 +435,16 @@ def _save_buffer_tokens(artist_id: str, tokens: dict):
     profile["buffer_tokens"] = tokens
     _save_artist_data(artist_id, profile)
 
+def _clear_buffer_tokens(artist_id: str):
+    """Remove only an invalid Buffer credential from the artist profile."""
+    profile = _load_artist_data(artist_id)
+    if not isinstance(profile, dict):
+        profile = {"artist_id": artist_id}
+    else:
+        profile = dict(profile)
+    profile["buffer_tokens"] = {}
+    _save_artist_data(artist_id, profile)
+
 
 class BufferNotConnected(Exception):
     pass
@@ -628,6 +638,7 @@ async def _buffer_list_profiles(artist_id: str) -> list[dict]:
             "event": "buffer_profiles_auth_expired",
             "status": resp.status_code,
         })
+        _clear_buffer_tokens(artist_id)
         raise BufferAuthExpired(
             "Buffer authorization expired; reconnect Buffer before continuing"
         )

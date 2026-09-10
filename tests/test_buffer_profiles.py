@@ -158,6 +158,8 @@ def test_buffer_list_profiles_classifies_expired_authorization(monkeypatch, stat
         "_load_buffer_tokens",
         lambda artist_id: {"access_token": "token-123"},
     )
+    clear_tokens = MagicMock()
+    monkeypatch.setattr(svc, "_clear_buffer_tokens", clear_tokens)
 
     resp = _mock_response(status_code, {}, "authorization rejected")
     client = MagicMock()
@@ -169,6 +171,36 @@ def test_buffer_list_profiles_classifies_expired_authorization(monkeypatch, stat
     with patch("social_service.httpx.AsyncClient", return_value=cm):
         with pytest.raises(svc.BufferAuthExpired, match="reconnect Buffer"):
             asyncio.run(svc._buffer_list_profiles("artist-1"))
+    clear_tokens.assert_called_once_with("artist-1")
+
+
+def test_buffer_expired_profile_discovery_clears_only_buffer_tokens(monkeypatch):
+    saved = []
+    monkeypatch.setattr(svc, "_load_buffer_tokens", lambda artist_id: {"access_token": "expired"})
+    monkeypatch.setattr(svc, "_load_artist_data", lambda artist_id: {
+        "artist_id": artist_id,
+        "buffer_tokens": {"access_token": "expired"},
+        "gmail_tokens": {"access_token": "still-valid"},
+    })
+    monkeypatch.setattr(svc, "_save_artist_data", lambda artist_id, profile: saved.append((artist_id, profile)))
+
+    resp = _mock_response(401, {}, "authorization rejected")
+    client = MagicMock()
+    client.get = AsyncMock(return_value=resp)
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=client)
+    cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("social_service.httpx.AsyncClient", return_value=cm):
+        with pytest.raises(svc.BufferAuthExpired):
+            asyncio.run(svc._buffer_list_profiles("artist-1"))
+
+    assert saved == [("artist-1", {
+        "artist_id": "artist-1",
+        "buffer_tokens": {},
+        "gmail_tokens": {"access_token": "still-valid"},
+    })]
+
 
 
 def test_buffer_list_profiles_rejects_invalid_shape(monkeypatch):
