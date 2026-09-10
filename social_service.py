@@ -51,6 +51,12 @@ _BUFFER_AUTH_URL      = "https://bufferapp.com/oauth2/authorize"
 _BUFFER_TOKEN_URL     = "https://api.bufferapp.com/1/oauth2/token.json"
 _BUFFER_POST_URL      = "https://api.bufferapp.com/1/updates/create.json"
 _BUFFER_PROFILES_URL  = "https://api.bufferapp.com/1/profiles.json"
+# Keep provider-controlled discovery data bounded before it reaches the
+# artist-facing selector or becomes part of an approved execution binding.
+_MAX_BUFFER_PROFILES     = 100
+_MAX_BUFFER_PROFILE_ID   = 256
+_MAX_BUFFER_PROFILE_TEXT = 512
+_MAX_BUFFER_AVATAR_URL   = 2048
 # R-26: feature flag for real Buffer HTTP client (BUFFER_LIVE=false default — safe)
 _BUFFER_LIVE          = os.environ.get("BUFFER_LIVE", "false").lower() == "true"
 
@@ -590,22 +596,44 @@ async def _buffer_list_profiles(artist_id: str) -> list[dict]:
     except Exception:
         raise RuntimeError("Buffer API returned non-JSON profile response")
 
-    if not isinstance(data, list) or any(not isinstance(profile, dict) for profile in data):
+    if (
+        not isinstance(data, list)
+        or len(data) > _MAX_BUFFER_PROFILES
+        or any(not isinstance(profile, dict) for profile in data)
+    ):
         raise RuntimeError("Buffer API returned invalid profile response")
 
     profiles = []
+    seen_profile_ids = set()
     for profile in data:
         profile_id = profile.get("id")
-        if not isinstance(profile_id, str) or not profile_id.strip():
+        if (
+            not isinstance(profile_id, str)
+            or not profile_id.strip()
+            or len(profile_id.strip()) > _MAX_BUFFER_PROFILE_ID
+        ):
             raise RuntimeError("Buffer API returned invalid profile response")
-        normalized = {"id": profile_id.strip()}
+        normalized_id = profile_id.strip()
+        if normalized_id in seen_profile_ids:
+            raise RuntimeError("Buffer API returned duplicate profile IDs")
+        seen_profile_ids.add(normalized_id)
+        normalized = {"id": normalized_id}
         for field in (
             "service", "formatted_username", "service_username", "username",
             "name", "avatar_url",
         ):
             value = profile.get(field)
-            if isinstance(value, str) and value.strip():
-                normalized[field] = value.strip()
+            if not isinstance(value, str) or not value.strip():
+                continue
+            normalized_value = value.strip()
+            maximum = (
+                _MAX_BUFFER_AVATAR_URL
+                if field == "avatar_url"
+                else _MAX_BUFFER_PROFILE_TEXT
+            )
+            if len(normalized_value) > maximum:
+                raise RuntimeError("Buffer API returned invalid profile response")
+            normalized[field] = normalized_value
         profiles.append(normalized)
 
     return profiles

@@ -211,3 +211,67 @@ def test_buffer_post_classifies_expired_authorization(monkeypatch, status_code):
     with patch("social_service.httpx.AsyncClient", return_value=cm):
         with pytest.raises(svc.BufferAuthExpired, match="reconnect Buffer"):
             asyncio.run(svc._buffer_post_real("token-123", "Post", ["profile-1"]))
+
+def test_buffer_list_profiles_rejects_duplicate_ids(monkeypatch):
+    monkeypatch.setattr(
+        svc,
+        "_load_buffer_tokens",
+        lambda artist_id: {"access_token": "token-123"},
+    )
+
+    resp = _mock_response(200, [{"id": "profile-1"}, {"id": " profile-1 "}])
+    client = MagicMock()
+    client.get = AsyncMock(return_value=resp)
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=client)
+    cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("social_service.httpx.AsyncClient", return_value=cm):
+        with pytest.raises(RuntimeError, match="duplicate profile IDs"):
+            asyncio.run(svc._buffer_list_profiles("artist-1"))
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        {"id": "x" * 257},
+        {"id": "profile-1", "name": "x" * 513},
+        {"id": "profile-1", "avatar_url": "https://example.com/" + "x" * 2041},
+    ],
+)
+def test_buffer_list_profiles_rejects_oversized_fields(monkeypatch, profile):
+    monkeypatch.setattr(
+        svc,
+        "_load_buffer_tokens",
+        lambda artist_id: {"access_token": "token-123"},
+    )
+
+    resp = _mock_response(200, [profile])
+    client = MagicMock()
+    client.get = AsyncMock(return_value=resp)
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=client)
+    cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("social_service.httpx.AsyncClient", return_value=cm):
+        with pytest.raises(RuntimeError, match="invalid profile response"):
+            asyncio.run(svc._buffer_list_profiles("artist-1"))
+
+
+def test_buffer_list_profiles_rejects_oversized_profile_collection(monkeypatch):
+    monkeypatch.setattr(
+        svc,
+        "_load_buffer_tokens",
+        lambda artist_id: {"access_token": "token-123"},
+    )
+
+    resp = _mock_response(200, [{"id": "profile-" + str(index)} for index in range(101)])
+    client = MagicMock()
+    client.get = AsyncMock(return_value=resp)
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=client)
+    cm.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("social_service.httpx.AsyncClient", return_value=cm):
+        with pytest.raises(RuntimeError, match="invalid profile response"):
+            asyncio.run(svc._buffer_list_profiles("artist-1"))

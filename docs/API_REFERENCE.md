@@ -602,7 +602,7 @@ Sorted alphabetically by path.
 - **Auth:** Yes (X-API-Key)
 - **Query params:** `artist_id` (string, required)
 - **Persistent side effects:** None; profile discovery is read-only
-- **Response:** 200 — `{ artist_id: string, profiles: [{ id, service, formatted_username, ... }] }`
+- **Response:** 200 — `{ artist_id: string, profiles: [{ id, service, formatted_username, ... }] }`; profile discovery rejects malformed, duplicate, or oversized provider responses (maximum 100 profiles)
 - **Failures:** 409 when Buffer is not connected; 502 when Buffer returns an invalid or failed response
 
 ---
