@@ -1327,6 +1327,15 @@ def lookup_operation(
     except ArtistAuthError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
+    # Recovery is a read-only path, but it still accepts artist-controlled
+    # identifiers. Apply the same bounded-input contract as operation
+    # creation before querying the durable ledger.
+    scoped_artist_id = _require_bounded_string(scoped_artist_id, "artist_id", MAX_IDENTIFIER_LENGTH)
+    action_type = _require_bounded_string(action_type, "action_type", MAX_IDENTIFIER_LENGTH)
+    idempotency_key = _require_bounded_string(
+        idempotency_key, "idempotency_key", MAX_IDENTIFIER_LENGTH,
+    )
+
     if action_type not in SUPPORTED_ACTIONS:
         raise HTTPException(
             status_code=422,

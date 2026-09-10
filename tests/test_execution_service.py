@@ -508,6 +508,34 @@ def test_operation_lookup_route_is_scoped_and_rejects_unsupported_actions(servic
     assert exc.value.status_code == 404
 
 
+def test_operation_lookup_rejects_unbounded_or_empty_recovery_identifiers(services, monkeypatch):
+    svc, _, _, _ = services
+    monkeypatch.setattr(svc, "require_artist_scope", lambda request, artist_id: artist_id)
+
+    for field, value in (
+        ("artist_id", ""),
+        ("action_type", "x" * (svc.MAX_IDENTIFIER_LENGTH + 1)),
+        ("idempotency_key", ""),
+        ("idempotency_key", "k" * (svc.MAX_IDENTIFIER_LENGTH + 1)),
+    ):
+        kwargs = {
+            "artist_id": "artist-1",
+            "action_type": svc.GMAIL_SEND,
+            "idempotency_key": "lookup-key",
+            "request": None,
+        }
+        kwargs[field] = value
+        with pytest.raises(HTTPException) as exc:
+            svc.lookup_operation(**kwargs)
+        assert exc.value.status_code == 422
+        if field == "artist_id" and value == "":
+            assert exc.value.detail == "artist_id is required"
+        elif field == "idempotency_key" and value == "":
+            assert exc.value.detail == "idempotency_key is required"
+        else:
+            assert exc.value.detail["code"] == "field_too_long"
+
+
 @pytest.mark.parametrize(
     "action_type",
     ["pitch.send", "pr.send", "booking.send", "social.batch", "release.execute"],
