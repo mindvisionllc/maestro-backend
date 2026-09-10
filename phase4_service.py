@@ -453,7 +453,7 @@ class IAPValidateRequest(BaseModel):
 
 
 @router.post("/api/iap/validate-receipt", tags=["phase4"])
-async def validate_iap_receipt(req: IAPValidateRequest):
+async def validate_iap_receipt(req: IAPValidateRequest, request: Request = None):
     """
     In-app purchase receipt validation stub.
     Apple receipt validation client is behind IAP_LIVE flag (default false).
@@ -463,17 +463,22 @@ async def validate_iap_receipt(req: IAPValidateRequest):
     must never claim that a receipt is valid. A mocked response is explicitly
     unvalidated so callers cannot treat it as an entitlement.
     """
+    try:
+        scoped_artist_id = require_artist_scope(request, req.artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
     if not _IAP_LIVE:
         log.info("would_have_validated_iap", extra={
             "event": "would_have_validated_iap",
-            "artist_id": req.artist_id, "product_id": req.product_id,
+            "artist_id": scoped_artist_id, "product_id": req.product_id,
             "reason": "IAP_LIVE not enabled",
         })
         return {
             "valid":          False,
             "mocked":         True,
             "validation_status": "not_validated",
-            "artist_id":      req.artist_id,
+            "artist_id":      scoped_artist_id,
             "product_id":     req.product_id,
             "transaction_id": req.transaction_id,
             "note":           "IAP_LIVE=false — receipt was not validated against Apple servers",
@@ -489,7 +494,7 @@ async def validate_iap_receipt(req: IAPValidateRequest):
         "valid":          False,
         "mocked":         True,
         "validation_status": "not_validated",
-        "artist_id":      req.artist_id,
+        "artist_id":      scoped_artist_id,
         "product_id":     req.product_id,
         "transaction_id": req.transaction_id,
         "note":           "IAP_LIVE=true — Apple validation client is not implemented",

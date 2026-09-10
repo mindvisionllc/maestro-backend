@@ -374,6 +374,36 @@ def test_iap_validate_receipt_fails_closed_when_not_connected(client):
     assert data["validation_status"] == "not_validated"
     assert data["product_id"] == "com.playmaker.pro.monthly"
 
+
+def test_iap_validate_receipt_enforces_artist_scope(client, p4, monkeypatch):
+    """Receipt validation must not accept a receipt for another artist."""
+    def reject_scope(_request, _artist_id):
+        raise p4.ArtistAuthError("Artist identity mismatch")
+
+    monkeypatch.setattr(p4, "require_artist_scope", reject_scope)
+    response = client.post("/api/iap/validate-receipt", json={
+        "artist_id": "artist-iap-other",
+        "receipt_data": "base64datahere==",
+        "product_id": "com.playmaker.pro.monthly",
+        "transaction_id": "txn-artist-scope",
+    }, headers=_HEADERS)
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Artist identity mismatch"
+
+
+def test_iap_validate_receipt_returns_scoped_artist_identity(p4, monkeypatch):
+    """The response must use the authenticated scope, not an untrusted claim."""
+    monkeypatch.setattr(p4, "require_artist_scope", lambda _request, _artist_id: "artist-canonical")
+    request = p4.IAPValidateRequest(
+        artist_id="artist-claimed",
+        receipt_data="base64datahere==",
+        product_id="com.playmaker.pro.monthly",
+        transaction_id="txn-canonical-scope",
+    )
+    import asyncio
+    result = asyncio.run(p4.validate_iap_receipt(request))
+    assert result["artist_id"] == "artist-canonical"
+
 @pytest.mark.parametrize("field", ["receipt_data", "product_id", "transaction_id"])
 def test_iap_validate_receipt_rejects_empty_required_values(client, field):
     payload = {
