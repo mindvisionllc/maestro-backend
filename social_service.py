@@ -727,6 +727,7 @@ async def _buffer_post_real(
     profile_ids: list[str],
     media_url: str = "",
     scheduled_at: Optional[str] = None,
+    artist_id: Optional[str] = None,
 ) -> dict:
     """POST to Buffer API with 429 retry (max 2 attempts) and 10s timeout."""
     payload: dict = {
@@ -763,6 +764,8 @@ async def _buffer_post_real(
                 "event": "buffer_post_auth_expired",
                 "status": resp.status_code,
             })
+            if artist_id:
+                _clear_buffer_tokens(artist_id)
             raise BufferAuthExpired(
                 "Buffer authorization expired; reconnect Buffer before continuing"
             )
@@ -836,6 +839,7 @@ async def _buffer_schedule_post(
         profile_ids=profile_ids,
         media_url=media_url,
         scheduled_at=scheduled_at,
+        artist_id=artist_id,
     )
 
 
