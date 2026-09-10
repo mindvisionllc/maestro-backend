@@ -42,6 +42,20 @@ def test_buffer_disconnect_clears_only_buffer_tokens(monkeypatch):
     })]
 
 
+def test_buffer_connect_url_is_artist_scoped_and_does_not_contact_provider(monkeypatch):
+    monkeypatch.setattr(svc, "_BUFFER_CLIENT_ID", "client-id")
+    monkeypatch.setattr(svc, "_BUFFER_REDIRECT_URI", "https://example.test/buffer/callback")
+    monkeypatch.setattr(svc, "identity_configured", lambda: False)
+    monkeypatch.setattr(svc, "require_artist_scope", lambda request, artist_id: artist_id)
+
+    result = svc.buffer_connect_url("artist-1")
+
+    assert result["url"].startswith("https://bufferapp.com/oauth2/authorize?")
+    assert "client_id=client-id" in result["url"]
+    assert "redirect_uri=https%3A%2F%2Fexample.test%2Fbuffer%2Fcallback" in result["url"]
+    assert "state=artist-1" in result["url"]
+
+
 def test_buffer_disconnect_enforces_artist_scope(monkeypatch):
     monkeypatch.setattr(
         svc,

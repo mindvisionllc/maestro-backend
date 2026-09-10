@@ -473,6 +473,31 @@ def buffer_auth(artist_id: str, request: Request = None):
 
 
 
+@router.get("/api/buffer/connect-url", tags=["buffer"])
+def buffer_connect_url(artist_id: str, request: Request = None):
+    """Return an authenticated artist-bound Buffer OAuth URL for mobile clients."""
+    try:
+        scoped_artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    if not _BUFFER_CLIENT_ID:
+        raise HTTPException(status_code=503, detail="BUFFER_CLIENT_ID not configured")
+
+    state = (
+        issue_oauth_state(scoped_artist_id, "buffer")
+        if identity_configured()
+        else scoped_artist_id
+    )
+    params = urlencode({
+        "client_id": _BUFFER_CLIENT_ID,
+        "redirect_uri": _BUFFER_REDIRECT_URI,
+        "response_type": "code",
+        "state": state,
+    })
+    return {"url": f"{_BUFFER_AUTH_URL}?{params}"}
+
+
 @router.get("/api/buffer/callback", tags=["buffer"])
 async def buffer_callback(code: str, state: str):
     """Exchange Buffer code using signed artist-bound state."""

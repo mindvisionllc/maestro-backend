@@ -591,6 +591,15 @@ Sorted alphabetically by path.
 - **Query params:** `code` (string, required), `state` (string, required)
 - **Response:** 200 — token stored confirmation
 
+#### GET /api/buffer/connect-url
+
+- **Summary:** Buffer Connect URL — return an authenticated artist-bound OAuth URL for mobile clients
+- **Auth:** Yes (X-API-Key)
+- **Query params:** `artist_id` (string, required)
+- **Persistent side effects:** None; the OAuth state is exchanged only by the callback
+- **Response:** 200 — `{ url: string }`
+- **Failures:** 404 when the artist scope is not owned by the authenticated artist; 503 when Buffer OAuth is not configured
+
 #### GET /api/buffer/status
 
 - **Summary:** Buffer Status — check whether artist has an active Buffer token

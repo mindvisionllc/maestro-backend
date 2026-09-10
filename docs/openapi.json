@@ -2041,6 +2041,24 @@
         }
       }
     },
+    "/api/buffer/connect-url": {
+      "get": {
+        "tags": ["buffer"],
+        "summary": "Buffer Connect Url",
+        "description": "Return an authenticated artist-bound Buffer OAuth URL for mobile clients.",
+        "operationId": "buffer_connect_url_api_buffer_connect_url_get",
+        "parameters": [{
+          "name": "artist_id",
+          "in": "query",
+          "required": true,
+          "schema": {"type": "string", "title": "Artist Id"}
+        }],
+        "responses": {
+          "200": {"description": "Successful Response", "content": {"application/json": {"schema": {}}}},
+          "422": {"description": "Validation Error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HTTPValidationError"}}}}
+        }
+      }
+    },
     "/api/buffer/status": {
       "get": {
         "tags": [
