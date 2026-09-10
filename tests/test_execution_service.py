@@ -1231,3 +1231,26 @@ def test_operation_history_cursor_continues_without_duplicates_or_cross_artist_l
         svc._list_operations("artist-1", before="not-a-cursor")
     assert exc.value.status_code == 422
     assert exc.value.detail == {"code": "invalid_operation_cursor"}
+
+
+def test_provider_diagnostics_are_bounded_before_ledger_persistence():
+    svc = __import__("execution_service")
+    small = {"message_id": "msg-1", "status": "sent"}
+    assert svc._bounded_provider_result(small) == small
+
+    oversized = {"body": "x" * (svc.MAX_PROVIDER_RESULT_BYTES + 1)}
+    bounded = svc._bounded_provider_result(oversized)
+    assert bounded == {
+        "truncated": True,
+        "reason": "provider_result_too_large",
+        "max_bytes": svc.MAX_PROVIDER_RESULT_BYTES,
+    }
+
+
+def test_error_details_are_bounded_without_changing_short_recovery_messages():
+    svc = __import__("execution_service")
+    assert svc._bounded_error_detail("Reconnect Buffer before retrying.") == "Reconnect Buffer before retrying."
+
+    bounded = svc._bounded_error_detail("e" * (svc.MAX_ERROR_DETAIL_LENGTH + 100))
+    assert len(bounded) == svc.MAX_ERROR_DETAIL_LENGTH
+    assert bounded.endswith("… [detail truncated]")

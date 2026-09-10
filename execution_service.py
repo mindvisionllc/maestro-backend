@@ -50,6 +50,8 @@ MAX_EMAIL_BODY_LENGTH = 256 * 1024
 MAX_SOCIAL_ID_LENGTH = 256
 MAX_BUFFER_PROFILES = 20
 MAX_OPERATION_PAYLOAD_BYTES = 512 * 1024
+MAX_PROVIDER_RESULT_BYTES = 64 * 1024
+MAX_ERROR_DETAIL_LENGTH = 2048
 
 SUPPORTED_SOCIAL_PLATFORMS = {
     "facebook": "facebook",
@@ -67,6 +69,33 @@ RECONCILABLE_STATUSES = {"unknown"}
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _bounded_provider_result(value) -> dict | list | str | int | float | bool | None:
+    """Keep provider diagnostics bounded before writing them to the ledger."""
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError, OverflowError):
+        return {"truncated": True, "reason": "provider_result_not_json"}
+    if len(encoded.encode("utf-8")) <= MAX_PROVIDER_RESULT_BYTES:
+        return value
+    return {
+        "truncated": True,
+        "reason": "provider_result_too_large",
+        "max_bytes": MAX_PROVIDER_RESULT_BYTES,
+    }
+
+
+def _bounded_error_detail(value: Optional[str]) -> Optional[str]:
+    """Prevent provider/library exception text from bloating artist history."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        value = str(value)
+    if len(value) <= MAX_ERROR_DETAIL_LENGTH:
+        return value
+    suffix = "… [detail truncated]"
+    return value[: MAX_ERROR_DETAIL_LENGTH - len(suffix)] + suffix
 
 
 def _message_id_for(operation_id: str) -> str:
@@ -621,6 +650,8 @@ def _finish(
     restore_social_post_id: Optional[str] = None,
 ) -> dict:
     timestamp = _now()
+    bounded_provider_result = _bounded_provider_result(provider_result)
+    bounded_error_detail = _bounded_error_detail(error_detail)
     # An ambiguous provider response still ends the dispatch attempt. Keep
     # that timestamp separate from a later reconciliation timestamp.
     attempt_completed_at = timestamp if status in {"succeeded", "failed"} or (
@@ -654,10 +685,10 @@ def _finish(
         where = "WHERE id=?"
         params = [
             status,
-            json.dumps(provider_result) if provider_result is not None else None,
+            json.dumps(bounded_provider_result) if provider_result is not None else None,
             provider_reference,
             error_code,
-            error_detail,
+            bounded_error_detail,
             timestamp,
             attempt_completed_at,
             1 if reconciled else 0,
