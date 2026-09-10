@@ -103,6 +103,8 @@ Sorted alphabetically by path.
 | GET | `/api/releases/{release_id}` | Yes (X-API-Key) | Get Release |
 | PATCH | `/api/releases/{release_id}` | Yes (X-API-Key) | Patch Release |
 | GET | `/api/releases/{release_id}/campaign` | Yes (X-API-Key) | Get Campaign |
+| POST | `/api/releases/{release_id}/campaign/approve` | Yes (X-API-Key) | Approve Campaign |
+| POST | `/api/releases/{release_id}/campaign/ready` | Yes (X-API-Key) | Mark Campaign Ready |
 | POST | `/api/releases/{release_id}/campaign/execute-due` | Yes (X-API-Key) | Execute Due Actions |
 | POST | `/api/releases/{release_id}/generate-campaign` | Yes (X-API-Key) | Generate Campaign |
 | GET | `/api/reports/weekly` | Yes (X-API-Key) | List Weekly Reports |
@@ -765,7 +767,7 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 
 #### POST /api/releases/{release_id}/generate-campaign
 
-- **Summary:** Generate Campaign — generate campaign_actions for a release (idempotent; clears pending actions and regenerates)
+- **Summary:** Generate Campaign — generate campaign_actions for a release (idempotent; clears unexecuted draft actions and regenerates)
 - **Auth:** Yes (X-API-Key)
 - **Path params:** `release_id` (string, required)
 - **Response:** 200 — array of generated campaign actions
@@ -777,9 +779,23 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 - **Path params:** `release_id` (string, required)
 - **Response:** 200 — array of campaign action objects
 
+#### POST /api/releases/{release_id}/campaign/approve
+
+- **Summary:** Approve Campaign — record artist approval for all generated, unexecuted campaign actions
+- **Auth:** Yes (X-API-Key)
+- **Path params:** `release_id` (string, required)
+- **Response:** 200 — `{ approved: N, status: "approved" }`
+
+#### POST /api/releases/{release_id}/campaign/ready
+
+- **Summary:** Mark Campaign Ready — release approved actions to the due-action execution queue
+- **Auth:** Yes (X-API-Key)
+- **Path params:** `release_id` (string, required)
+- **Response:** 200 — `{ ready: N, status: "ready" }`
+
 #### POST /api/releases/{release_id}/campaign/execute-due
 
-- **Summary:** Execute Due Actions — execute all campaign actions for this release where `scheduled_for <= now`
+- **Summary:** Execute Due Actions — execute only approved and readiness-released actions where `scheduled_for <= now`
 - **Auth:** Yes (X-API-Key)
 - **Path params:** `release_id` (string, required)
 - **Response:** 200 — `{ executed: N, failed: M, results: [...] }`

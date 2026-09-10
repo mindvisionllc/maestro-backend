@@ -3512,6 +3512,88 @@
         }
       }
     },
+    "/api/releases/{release_id}/campaign/approve": {
+      "post": {
+        "tags": [
+          "releases"
+        ],
+        "summary": "Approve Campaign",
+        "description": "Record the artist's approval of every unexecuted campaign action.",
+        "operationId": "approve_campaign_api_releases__release_id__campaign_approve_post",
+        "parameters": [
+          {
+            "name": "release_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Release Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/releases/{release_id}/campaign/ready": {
+      "post": {
+        "tags": [
+          "releases"
+        ],
+        "summary": "Ready Campaign",
+        "description": "Release an approved campaign to the due-action execution queue.",
+        "operationId": "ready_campaign_api_releases__release_id__campaign_ready_post",
+        "parameters": [
+          {
+            "name": "release_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Release Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/releases/{release_id}/campaign": {
       "get": {
         "tags": [
@@ -3559,7 +3641,7 @@
           "releases"
         ],
         "summary": "Execute Due Actions",
-        "description": "Execute all campaign actions for this release that are due (scheduled_for <= now).\nUpdates action status to done/failed with result.",
+        "description": "Execute only artist-approved and readiness-released campaign actions that\nare due (scheduled_for <= now). Updates action status to done/failed with result.",
         "operationId": "execute_due_actions_api_releases__release_id__campaign_execute_due_post",
         "parameters": [
           {

@@ -53,7 +53,7 @@ def _seed_stuck_row(db_path):
 # Test 1 — stuck 'running' row is reset to 'pending' by init_release_db()
 # ---------------------------------------------------------------------------
 
-def test_stuck_running_row_reset_to_pending(monkeypatch, tmp_path):
+def test_stuck_running_row_reset_to_ready(monkeypatch, tmp_path):
     db_path = str(tmp_path / "release.db")
     _seed_stuck_row(db_path)
 
@@ -67,7 +67,7 @@ def test_stuck_running_row_reset_to_pending(monkeypatch, tmp_path):
     conn.close()
 
     assert row is not None
-    assert row[0] == "pending", f"Expected 'pending', got {row[0]!r}"
+    assert row[0] == "ready", f"Expected 'ready', got {row[0]!r}"
 
 
 # ---------------------------------------------------------------------------

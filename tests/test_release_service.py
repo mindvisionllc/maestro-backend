@@ -158,7 +158,7 @@ def test_get_campaign_returns_action_list(client, rs):
     assert resp.status_code == 200
     data = resp.json()
     assert "actions" in data
-    assert data["counts"]["pending"] == len(rs._CAMPAIGN_SCHEDULE)
+    assert data["counts"]["awaiting_approval"] == len(rs._CAMPAIGN_SCHEDULE)
 
 
 def test_execute_due_fires_past_actions(rs):
@@ -169,6 +169,8 @@ def test_execute_due_fires_past_actions(rs):
 
     async def _run():
         mock_result = {"status": "skipped", "reason": "no contacts"}
+        for action in actions:
+            rs._db_update_action(action["id"], {"status": "ready"})
         with patch.object(rs, "_execute_action", new=AsyncMock(return_value=mock_result)):
             due = rs._db_list_due_actions()
             for action in due:
@@ -184,6 +186,10 @@ def test_execute_due_fires_past_actions(rs):
 def test_execute_due_endpoint_returns_summary(client, rs):
     r = _make_release(rs, release_date=_PAST_DATE)
     client.post(f"/api/releases/{r['id']}/generate-campaign")
+    blocked = client.post(f"/api/releases/{r['id']}/campaign/execute-due")
+    assert blocked.json()["executed"] == 0
+    assert client.post(f"/api/releases/{r['id']}/campaign/approve").json()["approved"] > 0
+    assert client.post(f"/api/releases/{r['id']}/campaign/ready").json()["ready"] > 0
 
     mock_result = {"status": "skipped", "reason": "no contacts"}
     with patch("release_service._execute_action", new=AsyncMock(return_value=mock_result)):
@@ -196,7 +202,7 @@ def test_execute_due_endpoint_returns_summary(client, rs):
 
 
 def test_init_release_db_resets_stuck_running_actions(tmp_path, monkeypatch):
-    """Startup reset: rows stuck in status='running' are returned to 'pending'."""
+    """Startup reset: running rows return to ready without losing approval."""
     import importlib, sqlite3, uuid
     db = tmp_path / "stuck.db"
     monkeypatch.setenv("DB_PATH", str(db))
@@ -221,7 +227,8 @@ def test_init_release_db_resets_stuck_running_actions(tmp_path, monkeypatch):
     conn.commit()
     conn.close()
 
-    # Re-run init (simulates a restart) — should reset the stuck rows
+    # Re-run init (simulates a restart) — should reset the stuck rows to the
+    # execution-ready state without dropping the approval gate.
     importlib.reload(release_service)
     release_service.init_release_db()
 
@@ -229,4 +236,4 @@ def test_init_release_db_resets_stuck_running_actions(tmp_path, monkeypatch):
     rows = conn.execute("SELECT status FROM campaign_actions").fetchall()
     conn.close()
 
-    assert all(r[0] == "pending" for r in rows), f"Expected all pending, got: {rows}"
+    assert all(r[0] == "ready" for r in rows), f"Expected all ready, got: {rows}"

@@ -110,16 +110,16 @@ def init_release_db():
         "ON campaign_actions (status, scheduled_for)"
     )
 
-    # Reset any actions stuck in "running" from a prior crash/restart.
-    # "running" is set just before execution; a process kill leaves it there
-    # permanently since the due-action query only picks up status='pending'.
+    # Reset any actions stuck in "running" from a prior crash/restart. A
+    # running action already passed artist approval and readiness, so recovery
+    # must preserve those gates rather than silently returning it to draft.
 
     result = conn.execute(
-        "UPDATE campaign_actions SET status='pending' WHERE status='running'"
+        "UPDATE campaign_actions SET status='ready' WHERE status='running'"
     )
     if result.rowcount:
         log.warning("db_reset_stuck_actions", extra={"reset_count": result.rowcount, "event": "db_reset_stuck_actions"})
-        print(f"[Release] Reset {result.rowcount} stuck 'running' action(s) to 'pending' at startup")
+        print(f"[Release] Reset {result.rowcount} stuck 'running' action(s) to 'ready' at startup")
     conn.commit()
     conn.close()
     log.info("db_ready", extra={"event": "db_ready", "svc": "release_service"})
@@ -236,7 +236,7 @@ def _db_list_due_actions() -> list[dict]:
     cur  = conn.cursor()
     cur.execute(
         f"SELECT {','.join(_ACTION_COLS)} FROM campaign_actions "
-        "WHERE status='pending' AND scheduled_for<=? ORDER BY scheduled_for",
+        "WHERE status='ready' AND scheduled_for<=? ORDER BY scheduled_for",
         (now,),
     )
     rows = cur.fetchall()
@@ -294,7 +294,7 @@ def _build_campaign_actions(release: dict) -> list[dict]:
             "release_id":   release["id"],
             "action_type":  action_type,
             "scheduled_for": scheduled,
-            "status":       "pending",
+            "status":       "awaiting_approval",
             "payload":      payload,
         })
 
@@ -502,10 +502,11 @@ def generate_campaign(release_id: str, request: Request = None):
     except ArtistAuthError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
-    # Clear existing pending actions
+    # Clear unexecuted actions from the prior generated plan. Completed and
+    # failed history remains durable and is never overwritten.
     conn = _conn()
     conn.execute(
-        "DELETE FROM campaign_actions WHERE release_id=? AND status='pending'",
+        "DELETE FROM campaign_actions WHERE release_id=? AND status IN ('awaiting_approval','approved','ready')",
         (release_id,),
     )
     conn.commit()
@@ -522,6 +523,44 @@ def generate_campaign(release_id: str, request: Request = None):
             "status": "active"}
 
 
+@router.post("/api/releases/{release_id}/campaign/approve", tags=["releases"])
+def approve_campaign(release_id: str, request: Request = None):
+    """Record the artist's approval of every unexecuted campaign action."""
+    r = _db_get_release(release_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Release not found")
+    try:
+        require_artist_scope(request, r["artist_id"])
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    actions = _db_list_actions(release_id)
+    pending = [a for a in actions if a["status"] == "awaiting_approval"]
+    if not pending:
+        raise HTTPException(status_code=409, detail="No campaign actions are awaiting artist approval")
+    for action in pending:
+        _db_update_action(action["id"], {"status": "approved"})
+    return {"release_id": release_id, "approved": len(pending), "status": "approved"}
+
+
+@router.post("/api/releases/{release_id}/campaign/ready", tags=["releases"])
+def ready_campaign(release_id: str, request: Request = None):
+    """Release an approved campaign to the due-action execution queue."""
+    r = _db_get_release(release_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Release not found")
+    try:
+        require_artist_scope(request, r["artist_id"])
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    actions = _db_list_actions(release_id)
+    approved = [a for a in actions if a["status"] == "approved"]
+    if not approved:
+        raise HTTPException(status_code=409, detail="Approve the campaign before marking it ready")
+    for action in approved:
+        _db_update_action(action["id"], {"status": "ready"})
+    return {"release_id": release_id, "ready": len(approved), "status": "ready"}
+
+
 @router.get("/api/releases/{release_id}/campaign", tags=["releases"])
 def get_campaign(release_id: str, request: Request = None):
     """List all campaign actions for a release."""
@@ -536,7 +575,10 @@ def get_campaign(release_id: str, request: Request = None):
     return {"release_id": release_id, "actions": actions,
             "counts": {
                 "total":   len(actions),
-                "pending": sum(1 for a in actions if a["status"] == "pending"),
+                "pending": sum(1 for a in actions if a["status"] in ("pending", "awaiting_approval")),
+                "awaiting_approval": sum(1 for a in actions if a["status"] == "awaiting_approval"),
+                "approved": sum(1 for a in actions if a["status"] == "approved"),
+                "ready": sum(1 for a in actions if a["status"] == "ready"),
                 "done":    sum(1 for a in actions if a["status"] == "done"),
                 "failed":  sum(1 for a in actions if a["status"] == "failed"),
             }}
@@ -545,8 +587,8 @@ def get_campaign(release_id: str, request: Request = None):
 @router.post("/api/releases/{release_id}/campaign/execute-due", tags=["releases"])
 async def execute_due_actions(release_id: str, request: Request = None):
     """
-    Execute all campaign actions for this release that are due (scheduled_for <= now).
-    Updates action status to done/failed with result.
+    Execute only artist-approved and readiness-released campaign actions that
+    are due (scheduled_for <= now). Updates action status to done/failed with result.
     """
     r = _db_get_release(release_id)
     if not r:

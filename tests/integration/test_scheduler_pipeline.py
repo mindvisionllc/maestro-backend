@@ -5,7 +5,7 @@ Exercises the campaign scheduler sweep:
   - execute_all_due_campaign_actions() processes due actions up to SCHEDULER_BATCH_LIMIT
   - Actions with no matching contacts are marked done (skipped)
   - Pitch actions with real contacts call real code paths → observability stats increment
-  - Stuck "running" actions are reset to pending by init_release_db()
+  - Stuck "running" actions are reset to ready by init_release_db()
   - Completed actions are not re-executed on subsequent sweeps
   - Campaign generation creates properly dated actions for past releases
 
@@ -65,7 +65,7 @@ def release_svc(sched_client):
 def _insert_pending_action(db_path: str, release_id: str, artist_id: str,
                             action_type: str = "pitch_curators",
                             offset_hours: int = -1) -> str:
-    """Insert a pending campaign action scheduled in the past (default 1 h ago)."""
+    """Insert a readiness-released campaign action scheduled in the past (default 1 h ago)."""
     action_id   = str(uuid.uuid4())
     sched_at    = (datetime.now(timezone.utc) + timedelta(hours=offset_hours)).isoformat()
     payload_str = json.dumps({"artist_id": artist_id, "release_title": "Test EP",
@@ -76,7 +76,7 @@ def _insert_pending_action(db_path: str, release_id: str, artist_id: str,
         "INSERT INTO campaign_actions "
         "(id, release_id, action_type, scheduled_for, status, payload_json) "
         "VALUES (?,?,?,?,?,?)",
-        (action_id, release_id, action_type, sched_at, "pending", payload_str),
+        (action_id, release_id, action_type, sched_at, "ready", payload_str),
     )
     conn.commit()
     conn.close()
@@ -140,7 +140,7 @@ def test_sweep_pitch_action_skips_with_no_curators(sched_client):
 
 
 def test_sweep_batch_limit_caps_execution(tmp_path, monkeypatch):
-    """Global sweep: 5 pending actions with limit=2 → only 2 processed per tick."""
+    """Global sweep: 5 ready actions with limit=2 → only 2 processed per tick."""
     monkeypatch.setenv("SCHEDULER_BATCH_LIMIT", "2")
     db  = str(tmp_path / "batchlimit.db")
     app = build_release_app(db)
@@ -169,13 +169,13 @@ def test_sweep_batch_limit_caps_execution(tmp_path, monkeypatch):
     done_count    = conn.execute(
         "SELECT COUNT(*) FROM campaign_actions WHERE status='done'"
     ).fetchone()[0]
-    pending_count = conn.execute(
-        "SELECT COUNT(*) FROM campaign_actions WHERE status='pending'"
+    ready_count = conn.execute(
+        "SELECT COUNT(*) FROM campaign_actions WHERE status='ready'"
     ).fetchone()[0]
     conn.close()
 
     assert done_count    == 2, f"Expected 2 done, got {done_count}"
-    assert pending_count == 3, f"Expected 3 pending, got {pending_count}"
+    assert ready_count == 3, f"Expected 3 ready, got {ready_count}"
 
 
 def test_scheduler_pitch_action_cannot_bypass_durable_operations(sched_client):
@@ -229,7 +229,7 @@ def test_scheduler_pitch_action_cannot_bypass_durable_operations(sched_client):
 
 
 def test_stuck_running_actions_reset_on_init(tmp_path):
-    """Actions stuck in 'running' (from a crashed process) are reset to pending by init_release_db."""
+    """Actions stuck in 'running' (from a crashed process) are reset to ready by init_release_db."""
     import importlib
     import os
 
@@ -260,8 +260,8 @@ def test_stuck_running_actions_reset_on_init(tmp_path):
     importlib.reload(release_service)
     release_service.init_release_db()
 
-    assert _get_action_status(db, action_id) == "pending", (
-        "init_release_db must reset stuck 'running' actions to 'pending'"
+    assert _get_action_status(db, action_id) == "ready", (
+        "init_release_db must reset stuck 'running' actions to 'ready'"
     )
 
 
@@ -321,7 +321,7 @@ def test_past_release_generates_due_actions(sched_client):
     conn = sqlite3.connect(sched_client._db)
     due_count = conn.execute(
         "SELECT COUNT(*) FROM campaign_actions "
-        "WHERE release_id=? AND status='pending' AND scheduled_for <= ?",
+        "WHERE release_id=? AND status='awaiting_approval' AND scheduled_for <= ?",
         (release_id, now_iso),
     ).fetchone()[0]
     conn.close()

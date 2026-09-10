@@ -73,7 +73,7 @@ def test_release_lifecycle_full(app_and_db):
     resp = client.get(f"/api/releases/{release_id}/campaign")
     assert resp.status_code == 200
     camp = resp.json()
-    assert camp["counts"]["pending"] == len(rs._CAMPAIGN_SCHEDULE)
+    assert camp["counts"]["awaiting_approval"] == len(rs._CAMPAIGN_SCHEDULE)
     assert camp["counts"]["done"]    == 0
 
     # 4. No actions due yet (release is 30 days away)
@@ -89,7 +89,15 @@ def test_release_lifecycle_full(app_and_db):
     resp = client.post(f"/api/releases/{release_id}/generate-campaign")
     assert resp.status_code == 200
 
-    # 6. Execute due actions (mocked — no real email sends)
+    # 6. Artist approval and readiness are separate from execution.
+    resp = client.post(f"/api/releases/{release_id}/campaign/approve")
+    assert resp.status_code == 200
+    assert resp.json()["approved"] == len(rs._CAMPAIGN_SCHEDULE)
+    resp = client.post(f"/api/releases/{release_id}/campaign/ready")
+    assert resp.status_code == 200
+    assert resp.json()["ready"] == len(rs._CAMPAIGN_SCHEDULE)
+
+    # 7. Execute due actions (mocked — no real email sends)
     mock_result = {"status": "skipped", "reason": "no contacts seeded in IT env"}
     with patch("release_service._execute_action", new=AsyncMock(return_value=mock_result)):
         resp = client.post(f"/api/releases/{release_id}/campaign/execute-due")
@@ -98,12 +106,12 @@ def test_release_lifecycle_full(app_and_db):
     executed_data = resp.json()
     assert executed_data["executed"] > 0  # some actions were past due
 
-    # 7. Verify those actions are now marked done
+    # 8. Verify those actions are now marked done
     resp = client.get(f"/api/releases/{release_id}/campaign")
     counts = resp.json()["counts"]
     assert counts["done"] == executed_data["executed"]
 
-    # 8. Verify release is still readable
+    # 9. Verify release is still readable
     resp = client.get(f"/api/releases/{release_id}")
     assert resp.status_code == 200
     assert resp.json()["title"] == "Echoes"

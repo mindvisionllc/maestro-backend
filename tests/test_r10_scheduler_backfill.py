@@ -35,7 +35,7 @@ def rs():
 
 
 def _seed_pending_actions(rs, count: int, release_id: str = "rel-001") -> list:
-    """Seed `count` past-due pending campaign_actions directly in the DB."""
+    """Seed `count` past-due readiness-released campaign_actions directly in the DB."""
     import sqlite3
     from pathlib import Path
     import os
@@ -49,7 +49,7 @@ def _seed_pending_actions(rs, count: int, release_id: str = "rel-001") -> list:
             "INSERT INTO campaign_actions "
             "(id, release_id, action_type, scheduled_for, status) "
             "VALUES (?, ?, ?, ?, ?)",
-            (action_id, release_id, "pitch_curators", past, "pending"),
+            (action_id, release_id, "pitch_curators", past, "ready"),
         )
         ids.append(action_id)
     conn.commit()
