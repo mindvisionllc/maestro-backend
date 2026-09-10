@@ -1307,3 +1307,78 @@ def test_operation_event_responses_are_bounded_without_deleting_durable_history(
     assert recovered["events"][-1]["event_type"] == f"event-{svc.MAX_OPERATION_EVENTS + 6}"
     assert recovered["events_truncated"] is True
     assert svc._operation_event_count(operation["id"], operation["artist_id"]) == svc.MAX_OPERATION_EVENTS + 8
+
+
+@pytest.mark.parametrize("mutation", ["patch", "delete"])
+def test_bound_social_resource_cannot_drift_from_pending_operation(services, mutation):
+    svc, _, social, _ = services
+    post = {
+        "id": f"post-bound-{mutation}",
+        "artist_id": "artist-1",
+        "platform": "twitter",
+        "content": "Approved copy",
+        "media_url": "",
+        "status": "draft",
+        "scheduled_at": None,
+        "posted_at": None,
+        "post_url": "",
+        "engagement_stats": {},
+    }
+    social._db_create_post(post)
+    operation, created = svc._create_or_get_operation(
+        artist_id="artist-1",
+        action_type=svc.SOCIAL_SCHEDULE,
+        idempotency_key=f"bound-{mutation}",
+        payload={
+            "post_id": post["id"],
+            "platform": "twitter",
+            "buffer_profile_ids": ["profile-1"],
+        },
+    )
+    assert created is True
+    assert svc._get_bound_operation(post["id"], "artist-1")["id"] == operation["id"]
+
+    with pytest.raises(HTTPException) as exc:
+        if mutation == "patch":
+            social.patch_post(post["id"], social.SocialPostPatch(content="Changed"))
+        else:
+            social.delete_post(post["id"])
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "durable_operation_bound"
+    assert exc.value.detail["operation_id"] == operation["id"]
+    assert social._db_get_post(post["id"])["content"] == "Approved copy"
+
+
+def test_terminal_social_operation_allows_resource_cleanup(services):
+    svc, _, social, _ = services
+    post = {
+        "id": "post-terminal",
+        "artist_id": "artist-1",
+        "platform": "twitter",
+        "content": "Completed copy",
+        "media_url": "",
+        "status": "posted",
+        "scheduled_at": None,
+        "posted_at": None,
+        "post_url": "",
+        "engagement_stats": {},
+    }
+    social._db_create_post(post)
+    operation, _ = svc._create_or_get_operation(
+        artist_id="artist-1",
+        action_type=svc.SOCIAL_SCHEDULE,
+        idempotency_key="terminal-bound",
+        payload={
+            "post_id": post["id"],
+            "platform": "twitter",
+            "buffer_profile_ids": ["profile-1"],
+        },
+    )
+    conn = sqlite3.connect(str(svc._DB_PATH))
+    conn.execute("UPDATE execution_operations SET status='succeeded' WHERE id=?", (operation["id"],))
+    conn.commit()
+    conn.close()
+
+    social.patch_post(post["id"], social.SocialPostPatch(content="Archived copy"))
+    assert social._db_get_post(post["id"])["content"] == "Archived copy"

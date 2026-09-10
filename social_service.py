@@ -351,6 +351,33 @@ class SocialPostPatch(BaseModel):
     engagement_stats: Optional[dict] = None
 
 
+def _require_post_mutation_allowed(post: dict):
+    """Prevent a live durable Buffer action from drifting from its resource.
+
+    The operation stores an approved payload snapshot. Editing or deleting the
+    post underneath that snapshot would make the artist-facing draft and the
+    eventual provider action disagree, so the artist must cancel the queued
+    operation first. Import lazily to avoid the execution/social router cycle.
+    """
+    try:
+        import execution_service
+        operation = execution_service._get_bound_operation(post["id"], post["artist_id"])
+    except (ImportError, KeyError):
+        operation = {}
+    if operation and operation.get("status") in {
+        "pending", "failed_retryable", "executing", "unknown",
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "durable_operation_bound",
+                "operation_id": operation["id"],
+                "status": operation["status"],
+                "message": "Cancel the queued Buffer operation before editing or deleting this post.",
+            },
+        )
+
+
 @router.get("/api/social/posts", tags=["social"])
 def list_posts(artist_id: str, platform: str = "", status: str = "", request: Request = None):
     try:
@@ -395,6 +422,7 @@ def patch_post(post_id: str, patch: SocialPostPatch, request: Request = None):
         raise HTTPException(status_code=404, detail=str(exc))
     updates = {k: v for k, v in patch.model_dump().items() if v is not None}
     if updates:
+        _require_post_mutation_allowed(existing)
         _db_update_post(post_id, updates)
     return {**existing, **updates}
 
@@ -408,6 +436,7 @@ def delete_post(post_id: str, request: Request = None):
         require_artist_scope(request, p["artist_id"])
     except ArtistAuthError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    _require_post_mutation_allowed(p)
     _db_delete_post(post_id)
 
 

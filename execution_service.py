@@ -372,6 +372,25 @@ def _operation_cursor(operation: dict) -> str:
     return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
 
 
+def _get_bound_operation(resource_key: str, artist_id: str) -> dict:
+    """Return the artist-owned durable operation bound to one resource."""
+    conn = sqlite3.connect(str(_DB_PATH))
+    try:
+        row = conn.execute(
+            f"""SELECT {','.join(_OP_COLS)}
+                FROM execution_operations
+                WHERE artist_id=? AND action_type=? AND resource_key=?""",
+            (artist_id, SOCIAL_SCHEDULE, resource_key),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc).lower():
+            raise
+        row = None
+    finally:
+        conn.close()
+    return _row_to_operation(row) if row else {}
+
+
 def _get_operation_by_idempotency(
     artist_id: str,
     action_type: str,
