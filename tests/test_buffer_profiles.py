@@ -15,6 +15,49 @@ def _mock_response(status_code=200, body=None, text=""):
     return resp
 
 
+def test_buffer_disconnect_clears_only_buffer_tokens(monkeypatch):
+    saved = []
+    original = {
+        "artist_id": "artist-1",
+        "display_name": "Artist",
+        "buffer_tokens": {"access_token": "token-123"},
+        "gmail_tokens": {"access_token": "gmail-token"},
+    }
+    monkeypatch.setattr(svc, "require_artist_scope", lambda request, artist_id: artist_id)
+    monkeypatch.setattr(svc, "_load_artist_data", lambda artist_id: dict(original))
+    monkeypatch.setattr(svc, "_save_artist_data", lambda artist_id, profile: saved.append((artist_id, profile)))
+
+    result = svc.buffer_disconnect("artist-1")
+
+    assert result == {
+        "status": "disconnected",
+        "connected": False,
+        "artist_id": "artist-1",
+    }
+    assert saved == [("artist-1", {
+        "artist_id": "artist-1",
+        "display_name": "Artist",
+        "buffer_tokens": {},
+        "gmail_tokens": {"access_token": "gmail-token"},
+    })]
+
+
+def test_buffer_disconnect_enforces_artist_scope(monkeypatch):
+    monkeypatch.setattr(
+        svc,
+        "require_artist_scope",
+        lambda request, artist_id: (_ for _ in ()).throw(svc.ArtistAuthError("Artist resource not found")),
+    )
+    save = MagicMock()
+    monkeypatch.setattr(svc, "_save_artist_data", save)
+
+    with pytest.raises(svc.HTTPException) as exc:
+        svc.buffer_disconnect("other-artist")
+
+    assert exc.value.status_code == 404
+    save.assert_not_called()
+
+
 def test_buffer_list_profiles_requires_connection(monkeypatch):
     monkeypatch.setattr(svc, "_load_buffer_tokens", lambda artist_id: {})
 

@@ -598,6 +598,15 @@ Sorted alphabetically by path.
 - **Query params:** `artist_id` (string, required)
 - **Response:** 200 — `{ connected: bool }`
 
+#### DELETE /api/buffer/connection
+
+- **Summary:** Disconnect Buffer — revoke the artist's stored Buffer connection
+- **Auth:** Yes (X-API-Key)
+- **Query params:** `artist_id` (string, required)
+- **Persistent side effects:** Clears only the artist's stored Buffer token data; other artist profile fields and provider connections are preserved
+- **Response:** 200 — `{ status: "disconnected", connected: false, artist_id: string }`
+- **Failures:** 404 when the artist scope is not owned by the authenticated artist
+
 #### GET /api/buffer/profiles
 
 - **Summary:** Buffer Profiles — discover the profiles available to an artist's connected Buffer account

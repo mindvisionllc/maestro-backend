@@ -2081,6 +2081,47 @@
         }
       }
     },
+    "/api/buffer/connection": {
+      "delete": {
+        "tags": [
+          "buffer"
+        ],
+        "summary": "Buffer Disconnect",
+        "description": "Revoke the artist's stored Buffer connection without changing other profile data.",
+        "operationId": "buffer_disconnect_api_buffer_connection_delete",
+        "parameters": [
+          {
+            "name": "artist_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Artist Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/buffer/profiles": {
       "get": {
         "tags": [

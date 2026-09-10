@@ -555,6 +555,29 @@ def buffer_status(artist_id: str, request: Request = None):
 
 
 
+@router.delete("/api/buffer/connection", tags=["buffer"])
+def buffer_disconnect(artist_id: str, request: Request = None):
+    """Revoke the artist's stored Buffer connection without changing other profile data."""
+    try:
+        scoped_artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    profile = _load_artist_data(scoped_artist_id)
+    if not isinstance(profile, dict):
+        profile = {"artist_id": scoped_artist_id}
+    else:
+        profile = dict(profile)
+    # Keep the profile record and all unrelated provider connections intact.
+    profile["buffer_tokens"] = {}
+    _save_artist_data(scoped_artist_id, profile)
+    log.info("buffer_connection_revoked", extra={
+        "event": "buffer_connection_revoked",
+        "artist_id": scoped_artist_id,
+    })
+    return {"status": "disconnected", "connected": False, "artist_id": scoped_artist_id}
+
+
 async def _buffer_list_profiles(artist_id: str) -> list[dict]:
     """Return Buffer profiles available to the artist's connected account."""
     tokens = _load_buffer_tokens(artist_id)
