@@ -59,7 +59,7 @@ SUPPORTED_SOCIAL_PLATFORMS = {
     "instagram": "instagram",
     "tiktok": "tiktok",
     "twitter": "twitter",
-    "x": "x",
+    "x": "twitter",
     "youtube": "youtube",
 }
 
@@ -1051,7 +1051,8 @@ async def execute_operation(operation_id: str, artist_id: Optional[str] = None) 
                 expected_status="executing",
             )
         requested_platform = payload.get("platform")
-        post_platform = str(post.get("platform") or "").strip().lower()
+        stored_platform = str(post.get("platform") or "").strip().lower()
+        post_platform = SUPPORTED_SOCIAL_PLATFORMS.get(stored_platform, stored_platform)
         if requested_platform and requested_platform != post_platform:
             return _finish(
                 operation_id,

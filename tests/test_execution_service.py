@@ -748,6 +748,38 @@ def test_single_social_post_success_updates_post_and_records_buffer_result(servi
     discovery.assert_not_called()
 
 
+def test_x_platform_alias_matches_buffer_twitter_profile(services, monkeypatch):
+    svc, _, social, _ = services
+    social._db_create_post({
+        "id": "post-x-alias",
+        "artist_id": "artist-1",
+        "platform": "x",
+        "content": "X alias post",
+        "status": "draft",
+    })
+    schedule = AsyncMock(return_value={"id": "buffer-x-1", "status": "buffer_queued"})
+    monkeypatch.setattr(social, "_BUFFER_LIVE", True)
+    monkeypatch.setattr(social, "_buffer_schedule_post", schedule)
+
+    operation, _ = svc._create_or_get_operation(
+        artist_id="artist-1",
+        action_type="social.buffer.schedule",
+        idempotency_key="x-alias",
+        payload={
+            "post_id": "post-x-alias",
+            "platform": "x",
+            "buffer_profile_ids": ["profile-2"],
+        },
+    )
+    _approve(svc, operation)
+
+    result = asyncio.run(svc.execute_operation(operation["id"], artist_id="artist-1"))
+
+    assert operation["payload"]["platform"] == "twitter"
+    assert result["status"] == "succeeded"
+    schedule.assert_awaited_once()
+
+
 def test_social_platform_binding_fails_closed_before_provider_dispatch(services, monkeypatch):
     svc, _, social, _ = services
     social._db_create_post({
