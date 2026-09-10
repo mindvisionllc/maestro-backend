@@ -97,6 +97,13 @@ def test_get_release_by_id(client, rs):
     assert resp.json()["title"] == r["title"]
 
 
+def test_get_release_by_id_returns_persisted_row_after_sqlite_round_trip(rs):
+    r = _make_release(rs, title="Persisted Release")
+    loaded = rs._db_get_release(r["id"])
+    assert loaded["id"] == r["id"]
+    assert loaded["title"] == "Persisted Release"
+
+
 def test_get_release_404(client):
     resp = client.get("/api/releases/nonexistent-id")
     assert resp.status_code == 404
@@ -199,6 +206,18 @@ def test_execute_due_endpoint_returns_summary(client, rs):
     data = resp.json()
     assert "executed" in data
     assert data["executed"] >= 0
+
+
+def test_due_action_claim_is_single_use_and_requires_ready_status(rs):
+    r = _make_release(rs, release_date=_PAST_DATE)
+    action = rs._build_campaign_actions(r)[0]
+    rs._db_create_action(action)
+
+    assert rs._db_claim_due_action(action["id"]) is False
+    rs._db_update_action(action["id"], {"status": "ready"})
+    assert rs._db_claim_due_action(action["id"]) is True
+    assert rs._db_claim_due_action(action["id"]) is False
+    assert rs._db_list_actions(r["id"])[0]["status"] == "running"
 
 
 def test_init_release_db_resets_stuck_running_actions(tmp_path, monkeypatch):

@@ -253,6 +253,22 @@ def _db_update_action(action_id: str, updates: dict):
     conn.close()
 
 
+def _db_claim_due_action(action_id: str) -> bool:
+    """Atomically claim one ready, due action for execution."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _conn()
+    try:
+        cursor = conn.execute(
+            "UPDATE campaign_actions SET status='running' "
+            "WHERE id=? AND status='ready' AND scheduled_for<=?",
+            (action_id, now),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Campaign Generation
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -603,7 +619,8 @@ async def execute_due_actions(release_id: str, request: Request = None):
 
     executed = []
     for action in due:
-        _db_update_action(action["id"], {"status": "running"})
+        if not _db_claim_due_action(action["id"]):
+            continue
         result = await _execute_action(action)
         final_status = "done" if result.get("status") in ("ok", "skipped") else "failed"
         _db_update_action(action["id"], {
@@ -644,7 +661,8 @@ async def execute_all_due_campaign_actions():
         )
 
     for action in batch:
-        _db_update_action(action["id"], {"status": "running"})
+        if not _db_claim_due_action(action["id"]):
+            continue
         result = await _execute_action(action)
         final_status = "done" if result.get("status") in ("ok", "skipped") else "failed"
         _db_update_action(action["id"], {
