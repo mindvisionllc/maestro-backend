@@ -13,6 +13,7 @@ are made until the flags are enabled.
 import json
 import logging
 import os
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -322,14 +323,22 @@ def get_app_config():
 
 # ── Version compatibility check ───────────────────────────────────────────────
 
+_RELEASE_VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+
+
+def _parse_release_version(version: str) -> tuple[int, int, int]:
+    """Parse the app's supported release-version shape or fail closed."""
+    if not isinstance(version, str):
+        raise ValueError("version must be a string")
+    match = _RELEASE_VERSION_RE.fullmatch(version.strip())
+    if not match:
+        raise ValueError("version must use major.minor.patch format")
+    return tuple(int(part) for part in match.groups())
+
+
 def _compare_semver(v1: str, v2: str) -> int:
     """Return -1 if v1 < v2, 0 if equal, 1 if v1 > v2."""
-    def parts(v):
-        try:
-            return [int(x) for x in v.strip().split(".")]
-        except ValueError:
-            return [0, 0, 0]
-    a, b = parts(v1), parts(v2)
+    a, b = _parse_release_version(v1), _parse_release_version(v2)
     for x, y in zip(a, b):
         if x < y:
             return -1
@@ -360,8 +369,14 @@ def version_check(req: VersionCheckRequest):
         raise HTTPException(status_code=400, detail="platform must be 'ios' or 'android'")
 
     current = req.current_version
-    below_min     = _compare_semver(current, min_ver) < 0
-    below_latest  = _compare_semver(current, _APP_CURRENT_VERSION) < 0
+    try:
+        below_min     = _compare_semver(current, min_ver) < 0
+        below_latest  = _compare_semver(current, _APP_CURRENT_VERSION) < 0
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="current_version must use major.minor.patch format",
+        ) from exc
 
     if below_min:
         status = "hard_update_required"

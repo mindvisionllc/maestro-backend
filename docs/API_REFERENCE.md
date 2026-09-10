@@ -1084,9 +1084,9 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 
 - **Summary:** Version Check — app sends its version; backend responds with update status
 - **Auth:** Yes (X-API-Key)
-- **Request body:** `platform` ("ios"|"android", required), `current_version` (semver string, required)
+- **Request body:** `platform` ("ios"|"android", required), `current_version` (three-part release version such as `1.2.0`, required)
 - **Response:** 200 — `{ status: "ok"|"soft_update"|"hard_update_required", message, current_version, latest_version, min_version }`
-- **Notes:** `hard_update_required` means version is below the minimum floor; `soft_update` means a newer version is available but not required
+- **Notes:** Malformed versions receive 422; `hard_update_required` means version is below the minimum floor; `soft_update` means a newer version is available but not required
 
 #### POST /api/iap/validate-receipt
 

@@ -307,11 +307,25 @@ def test_version_check_invalid_platform(client):
     assert r.status_code == 400
 
 
+@pytest.mark.parametrize("version", ["1", "1.0", "1.0.0.0", "v1.0.0", "01.0.0", "1.0.x"])
+def test_version_check_rejects_malformed_release_versions(client, version):
+    r = client.post("/api/app/version-check", json={
+        "platform": "ios", "current_version": version
+    }, headers=_HEADERS)
+    assert r.status_code == 422
+    assert r.json()["detail"] == "current_version must use major.minor.patch format"
+
+
 def test_compare_semver(p4):
     assert p4._compare_semver("1.0.0", "1.0.0") == 0
     assert p4._compare_semver("1.1.0", "1.0.0") == 1
     assert p4._compare_semver("0.9.0", "1.0.0") == -1
     assert p4._compare_semver("2.0.0", "1.9.9") == 1
+
+
+def test_compare_semver_rejects_malformed_versions(p4):
+    with pytest.raises(ValueError):
+        p4._compare_semver("1", "1.0.0")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
