@@ -332,8 +332,8 @@ def test_compare_semver_rejects_malformed_versions(p4):
 # IAP receipt validation stub
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def test_iap_validate_receipt_mocked(client):
-    """With IAP_LIVE=false, returns mocked valid response."""
+def test_iap_validate_receipt_fails_closed_when_not_connected(client):
+    """Without Apple validation, the stub must not grant an entitlement."""
     r = client.post("/api/iap/validate-receipt", json={
         "artist_id": "artist-iap-001",
         "receipt_data": "base64datahere==",
@@ -342,6 +342,32 @@ def test_iap_validate_receipt_mocked(client):
     }, headers=_HEADERS)
     assert r.status_code == 200
     data = r.json()
-    assert data["valid"] is True
+    assert data["valid"] is False
     assert data["mocked"] is True
+    assert data["validation_status"] == "not_validated"
     assert data["product_id"] == "com.playmaker.pro.monthly"
+
+@pytest.mark.parametrize("field", ["receipt_data", "product_id", "transaction_id"])
+def test_iap_validate_receipt_rejects_empty_required_values(client, field):
+    payload = {
+        "artist_id": "artist-iap-001",
+        "receipt_data": "base64datahere==",
+        "product_id": "com.playmaker.pro.monthly",
+        "transaction_id": "txn-abc-123",
+    }
+    payload[field] = ""
+    response = client.post("/api/iap/validate-receipt", json=payload, headers=_HEADERS)
+    assert response.status_code == 422
+
+def test_iap_live_stub_also_fails_closed(p4, monkeypatch):
+    import asyncio
+    monkeypatch.setattr(p4, "_IAP_LIVE", True)
+    request = p4.IAPValidateRequest(
+        artist_id="artist-iap-live-stub",
+        receipt_data="base64datahere==",
+        product_id="com.playmaker.pro.monthly",
+        transaction_id="txn-live-stub",
+    )
+    result = asyncio.run(p4.validate_iap_receipt(request))
+    assert result["valid"] is False
+    assert result["validation_status"] == "not_validated"

@@ -1093,8 +1093,8 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 - **Summary:** IAP Validate Receipt — validate Apple in-app purchase receipt (stub)
 - **Auth:** Yes (X-API-Key)
 - **Request body:** `artist_id` (string), `receipt_data` (base64 string), `product_id` (string), `transaction_id` (string)
-- **Response:** 200 — `{ valid: bool, mocked: bool, artist_id, product_id, transaction_id, note }`
-- **Notes:** Stub behind `IAP_LIVE` flag (default false); Stripe remains the primary billing rail; this endpoint exists for App Store compliance only
+- **Response:** 200 — `{ valid: false, mocked: true, validation_status: "not_validated", artist_id, product_id, transaction_id, note }`
+- **Notes:** Stub behind `IAP_LIVE` flag (default false). Until an Apple validation client is implemented, this endpoint always fails closed and must not grant an entitlement. Stripe remains the primary billing rail; this endpoint exists for App Store compliance only
 
 
 #### POST /api/agents/ar-scout/assess

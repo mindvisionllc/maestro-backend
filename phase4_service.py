@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from artist_identity import ArtistAuthError, require_artist_scope
 
@@ -405,9 +405,9 @@ def version_check(req: VersionCheckRequest):
 
 class IAPValidateRequest(BaseModel):
     artist_id:       str
-    receipt_data:    str     # base64-encoded Apple receipt
-    product_id:      str
-    transaction_id:  str
+    receipt_data:    str = Field(..., min_length=1, max_length=2_000_000)  # base64-encoded Apple receipt
+    product_id:      str = Field(..., min_length=1, max_length=200)
+    transaction_id:  str = Field(..., min_length=1, max_length=200)
 
 
 @router.post("/api/iap/validate-receipt", tags=["phase4"])
@@ -416,6 +416,10 @@ async def validate_iap_receipt(req: IAPValidateRequest):
     In-app purchase receipt validation stub.
     Apple receipt validation client is behind IAP_LIVE flag (default false).
     Stripe remains the primary billing rail; this is for App Store compliance.
+
+    Until an Apple validation client is implemented and exercised, this route
+    must never claim that a receipt is valid. A mocked response is explicitly
+    unvalidated so callers cannot treat it as an entitlement.
     """
     if not _IAP_LIVE:
         log.info("would_have_validated_iap", extra={
@@ -424,12 +428,13 @@ async def validate_iap_receipt(req: IAPValidateRequest):
             "reason": "IAP_LIVE not enabled",
         })
         return {
-            "valid":          True,
+            "valid":          False,
             "mocked":         True,
+            "validation_status": "not_validated",
             "artist_id":      req.artist_id,
             "product_id":     req.product_id,
             "transaction_id": req.transaction_id,
-            "note":           "IAP_LIVE=false — receipt not validated against Apple servers",
+            "note":           "IAP_LIVE=false — receipt was not validated against Apple servers",
         }
 
     # Real Apple receipt validation goes here when IAP_LIVE=true.
@@ -439,10 +444,11 @@ async def validate_iap_receipt(req: IAPValidateRequest):
         "note": "IAP_LIVE=true but Apple receipt validation not yet wired",
     })
     return {
-        "valid":          True,
+        "valid":          False,
         "mocked":         True,
+        "validation_status": "not_validated",
         "artist_id":      req.artist_id,
         "product_id":     req.product_id,
         "transaction_id": req.transaction_id,
-        "note":           "IAP_LIVE=true — live_stub (Apple client not yet wired)",
+        "note":           "IAP_LIVE=true — Apple validation client is not implemented",
     }
