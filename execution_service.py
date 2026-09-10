@@ -166,10 +166,12 @@ def init_execution_db():
         conn.execute("ALTER TABLE execution_operations ADD COLUMN approved_at TEXT")
     if "ready_at" not in existing_cols:
         conn.execute("ALTER TABLE execution_operations ADD COLUMN ready_at TEXT")
+    conn.execute("DROP INDEX IF EXISTS uq_execution_operation_resource")
     conn.execute(
         """CREATE UNIQUE INDEX IF NOT EXISTS uq_execution_operation_resource
            ON execution_operations (action_type, resource_key)
-           WHERE resource_key IS NOT NULL"""
+           WHERE resource_key IS NOT NULL
+             AND status IN ('pending', 'failed_retryable', 'executing', 'unknown')"""
     )
     # Never blindly retry a provider call after process loss: the provider may
     # have accepted it before the response or local commit was lost.
@@ -379,7 +381,13 @@ def _get_bound_operation(resource_key: str, artist_id: str) -> dict:
         row = conn.execute(
             f"""SELECT {','.join(_OP_COLS)}
                 FROM execution_operations
-                WHERE artist_id=? AND action_type=? AND resource_key=?""",
+                WHERE artist_id=? AND action_type=? AND resource_key=?
+                ORDER BY
+                    CASE WHEN status IN ('pending', 'failed_retryable', 'executing', 'unknown')
+                         THEN 0 ELSE 1 END,
+                    updated_at DESC,
+                    id DESC
+                LIMIT 1""",
             (artist_id, SOCIAL_SCHEDULE, resource_key),
         ).fetchone()
     except sqlite3.OperationalError as exc:

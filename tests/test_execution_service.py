@@ -1382,3 +1382,54 @@ def test_terminal_social_operation_allows_resource_cleanup(services):
 
     social.patch_post(post["id"], social.SocialPostPatch(content="Archived copy"))
     assert social._db_get_post(post["id"])["content"] == "Archived copy"
+
+
+def test_newer_active_social_operation_wins_over_terminal_history(services):
+    svc, _, social, _ = services
+    post = {
+        "id": "post-bound-history",
+        "artist_id": "artist-1",
+        "platform": "twitter",
+        "content": "Current approved copy",
+        "media_url": "",
+        "status": "draft",
+        "scheduled_at": None,
+        "posted_at": None,
+        "post_url": "",
+        "engagement_stats": {},
+    }
+    social._db_create_post(post)
+
+    terminal, _ = svc._create_or_get_operation(
+        artist_id="artist-1",
+        action_type=svc.SOCIAL_SCHEDULE,
+        idempotency_key="bound-history-terminal",
+        payload={
+            "post_id": post["id"],
+            "platform": "twitter",
+            "buffer_profile_ids": ["profile-1"],
+        },
+    )
+    conn = sqlite3.connect(str(svc._DB_PATH))
+    conn.execute(
+        "UPDATE execution_operations SET status='succeeded', updated_at=? WHERE id=?",
+        ("2026-01-01T00:00:00+00:00", terminal["id"]),
+    )
+    conn.commit()
+    conn.close()
+
+    active, _ = svc._create_or_get_operation(
+        artist_id="artist-1",
+        action_type=svc.SOCIAL_SCHEDULE,
+        idempotency_key="bound-history-active",
+        payload={
+            "post_id": post["id"],
+            "platform": "twitter",
+            "buffer_profile_ids": ["profile-1"],
+        },
+    )
+
+    assert svc._get_bound_operation(post["id"], "artist-1")["id"] == active["id"]
+    with pytest.raises(HTTPException) as exc:
+        social.patch_post(post["id"], social.SocialPostPatch(content="Drifted copy"))
+    assert exc.value.status_code == 409
