@@ -54,6 +54,7 @@ MAX_OPERATION_PAYLOAD_BYTES = 512 * 1024
 MAX_PROVIDER_RESULT_BYTES = 64 * 1024
 MAX_ERROR_DETAIL_LENGTH = 2048
 MAX_OPERATION_EVENTS = 100
+MAX_OPERATION_EVENT_METADATA_BYTES = 16 * 1024
 
 SUPPORTED_SOCIAL_PLATFORMS = {
     "facebook": "facebook",
@@ -98,6 +99,23 @@ def _bounded_error_detail(value: Optional[str]) -> Optional[str]:
         return value
     suffix = "… [detail truncated]"
     return value[: MAX_ERROR_DETAIL_LENGTH - len(suffix)] + suffix
+
+
+def _bounded_event_metadata(value) -> dict:
+    """Keep one durable audit event bounded without dropping the event itself."""
+    if not isinstance(value, dict):
+        return {"truncated": True, "reason": "event_metadata_not_object"}
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError, OverflowError):
+        return {"truncated": True, "reason": "event_metadata_not_json"}
+    if len(encoded.encode("utf-8")) <= MAX_OPERATION_EVENT_METADATA_BYTES:
+        return value
+    return {
+        "truncated": True,
+        "reason": "event_metadata_too_large",
+        "max_bytes": MAX_OPERATION_EVENT_METADATA_BYTES,
+    }
 
 
 def _message_id_for(operation_id: str) -> str:
@@ -299,13 +317,14 @@ def _insert_operation_event(
     this small primitive separate also lets the recovery path record its
     interruption event before exposing the recovered operation.
     """
+    bounded_metadata = _bounded_event_metadata(metadata or {})
     conn.execute(
         """INSERT INTO execution_operation_events
            (operation_id, artist_id, event_type, from_status, to_status, metadata, occurred_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
             operation_id, artist_id, event_type, from_status, to_status,
-            json.dumps(metadata or {}, sort_keys=True, separators=(",", ":")), _now(),
+            json.dumps(bounded_metadata, sort_keys=True, separators=(",", ":")), _now(),
         ),
     )
 

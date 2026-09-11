@@ -1343,6 +1343,49 @@ def test_error_details_are_bounded_without_changing_short_recovery_messages():
     assert bounded.endswith("… [detail truncated]")
 
 
+def test_operation_event_metadata_is_bounded_before_durable_persistence(services):
+    svc, _, _, _ = services
+    operation, _ = svc._create_or_get_operation(**_gmail_request(key="bounded-event-metadata"))
+    conn = sqlite3.connect(str(svc._DB_PATH))
+    svc._insert_operation_event(
+        conn,
+        operation["id"],
+        operation["artist_id"],
+        "diagnostic",
+        "pending",
+        metadata={"detail": "x" * (svc.MAX_OPERATION_EVENT_METADATA_BYTES + 1)},
+    )
+    conn.commit()
+    conn.close()
+
+    recovered = svc._get_operation(operation["id"])
+    metadata = recovered["events"][-1]["metadata"]
+    assert metadata == {
+        "truncated": True,
+        "reason": "event_metadata_too_large",
+        "max_bytes": svc.MAX_OPERATION_EVENT_METADATA_BYTES,
+    }
+
+
+def test_operation_event_metadata_rejects_non_json_values_without_failing_the_transition(services):
+    svc, _, _, _ = services
+    operation, _ = svc._create_or_get_operation(**_gmail_request(key="invalid-event-metadata"))
+    conn = sqlite3.connect(str(svc._DB_PATH))
+    svc._insert_operation_event(
+        conn,
+        operation["id"],
+        operation["artist_id"],
+        "diagnostic",
+        "pending",
+        metadata={"detail": object()},
+    )
+    conn.commit()
+    conn.close()
+
+    metadata = svc._get_operation(operation["id"])["events"][-1]["metadata"]
+    assert metadata == {"truncated": True, "reason": "event_metadata_not_json"}
+
+
 def test_operation_event_responses_are_bounded_without_deleting_durable_history(services):
     svc, _, _, _ = services
     operation, _ = svc._create_or_get_operation(**_gmail_request(key="bounded-events"))
