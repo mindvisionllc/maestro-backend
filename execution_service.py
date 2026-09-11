@@ -45,6 +45,7 @@ SUPPORTED_ACTIONS = {GMAIL_SEND, SOCIAL_SCHEDULE}
 # Keep the durable ledger bounded before user-controlled values are persisted
 # or handed to a provider. These are application limits, not provider limits.
 MAX_IDENTIFIER_LENGTH = 256
+MAX_OPERATION_CURSOR_LENGTH = 1024
 MAX_EMAIL_SUBJECT_LENGTH = 998
 MAX_EMAIL_BODY_LENGTH = 256 * 1024
 MAX_SOCIAL_ID_LENGTH = 256
@@ -333,6 +334,8 @@ def _list_operations(
         "pending", "failed_retryable", "executing", "succeeded", "failed", "unknown", "canceled",
     }:
         raise HTTPException(status_code=422, detail={"code": "invalid_operation_status"})
+    if before is not None and len(before) > MAX_OPERATION_CURSOR_LENGTH:
+        raise HTTPException(status_code=422, detail={"code": "invalid_operation_cursor"})
 
     where = ["artist_id=?"]
     params: list[object] = [artist_id]
@@ -820,6 +823,7 @@ def _require_operation_owner(operation: dict, artist_id: Optional[str]):
 
 
 def approve_operation(operation_id: str, artist_id: Optional[str] = None) -> dict:
+    operation_id = _require_bounded_string(operation_id, "operation_id", MAX_IDENTIFIER_LENGTH)
     operation = _get_operation(operation_id)
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
@@ -873,6 +877,7 @@ def approve_operation(operation_id: str, artist_id: Optional[str] = None) -> dic
 
 def mark_operation_ready(operation_id: str, artist_id: Optional[str] = None) -> dict:
     """Record the artist's final execution-detail confirmation."""
+    operation_id = _require_bounded_string(operation_id, "operation_id", MAX_IDENTIFIER_LENGTH)
     operation = _get_operation(operation_id)
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
@@ -939,6 +944,7 @@ def mark_operation_ready(operation_id: str, artist_id: Optional[str] = None) -> 
 
 def cancel_operation(operation_id: str, artist_id: Optional[str] = None) -> dict:
     """Withdraw queued work before any provider dispatch begins."""
+    operation_id = _require_bounded_string(operation_id, "operation_id", MAX_IDENTIFIER_LENGTH)
     operation = _get_operation(operation_id)
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
@@ -998,6 +1004,7 @@ def cancel_operation(operation_id: str, artist_id: Optional[str] = None) -> dict
 
 
 async def execute_operation(operation_id: str, artist_id: Optional[str] = None) -> dict:
+    operation_id = _require_bounded_string(operation_id, "operation_id", MAX_IDENTIFIER_LENGTH)
     existing = _get_operation(operation_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Operation not found")
@@ -1397,6 +1404,7 @@ def api_approve_operation(
         scoped_artist_id = require_artist_scope(request, artist_id)
     except ArtistAuthError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    operation_id = _require_bounded_string(operation_id, "operation_id", MAX_IDENTIFIER_LENGTH)
     return approve_operation(operation_id, artist_id=scoped_artist_id)
 
 
@@ -1410,6 +1418,7 @@ def api_mark_operation_ready(
         scoped_artist_id = require_artist_scope(request, artist_id)
     except ArtistAuthError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    operation_id = _require_bounded_string(operation_id, "operation_id", MAX_IDENTIFIER_LENGTH)
     return mark_operation_ready(operation_id, artist_id=scoped_artist_id)
 
 
@@ -1423,6 +1432,7 @@ def api_cancel_operation(
         scoped_artist_id = require_artist_scope(request, artist_id)
     except ArtistAuthError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    operation_id = _require_bounded_string(operation_id, "operation_id", MAX_IDENTIFIER_LENGTH)
     return cancel_operation(operation_id, artist_id=scoped_artist_id)
 
 
@@ -1433,6 +1443,8 @@ def get_operation(
     artist_id: str,
     request: Request = None,
 ):
+    operation_id = _require_bounded_string(operation_id, "operation_id", MAX_IDENTIFIER_LENGTH)
+
     try:
         scoped_artist_id = require_artist_scope(request, artist_id)
     except ArtistAuthError as exc:

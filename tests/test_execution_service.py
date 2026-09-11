@@ -1493,3 +1493,17 @@ def test_newer_active_social_operation_wins_over_terminal_history(services):
     with pytest.raises(HTTPException) as exc:
         social.patch_post(post["id"], social.SocialPostPatch(content="Drifted copy"))
     assert exc.value.status_code == 409
+
+
+def test_operation_history_rejects_oversized_cursor(services):
+    svc, _, _, _ = services
+    with pytest.raises(HTTPException) as exc:
+        svc._list_operations("artist-1", before="x" * (svc.MAX_OPERATION_CURSOR_LENGTH + 1))
+    assert exc.value.detail == {"code": "invalid_operation_cursor"}
+
+
+def test_operation_mutation_rejects_oversized_operation_id(services):
+    svc, _, _, _ = services
+    with pytest.raises(HTTPException) as exc:
+        svc.approve_operation("x" * (svc.MAX_IDENTIFIER_LENGTH + 1), artist_id="artist-1")
+    assert exc.value.detail == {"code": "field_too_long", "field": "operation_id", "max_length": svc.MAX_IDENTIFIER_LENGTH}
