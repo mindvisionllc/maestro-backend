@@ -1493,6 +1493,7 @@ async def api_execute_operation(
     scoped_artist_id = _require_bounded_string(
         scoped_artist_id, "artist_id", MAX_IDENTIFIER_LENGTH,
     )
+    operation_id = _require_bounded_string(operation_id, "operation_id", MAX_IDENTIFIER_LENGTH)
     return await execute_operation(operation_id, artist_id=scoped_artist_id)
 
 
@@ -1510,4 +1511,5 @@ async def api_reconcile_operation(
     scoped_artist_id = _require_bounded_string(
         scoped_artist_id, "artist_id", MAX_IDENTIFIER_LENGTH,
     )
+    operation_id = _require_bounded_string(operation_id, "operation_id", MAX_IDENTIFIER_LENGTH)
     return await reconcile_operation(operation_id, artist_id=scoped_artist_id)

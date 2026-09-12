@@ -284,6 +284,30 @@ def test_execution_routes_reject_unbounded_scoped_artist_identifiers(services, m
     assert exc.value.detail["field"] == "artist_id"
 
 
+def test_execution_and_reconciliation_routes_reject_unbounded_operation_ids(services, monkeypatch):
+    svc, _, _, _ = services
+    monkeypatch.setattr(svc, "require_artist_scope", lambda request, artist_id: artist_id)
+    oversized_operation_id = "operation-" + "x" * svc.MAX_IDENTIFIER_LENGTH
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(svc.api_execute_operation(oversized_operation_id, "artist-1", request=None))
+    assert exc.value.status_code == 422
+    assert exc.value.detail == {
+        "code": "field_too_long",
+        "field": "operation_id",
+        "max_length": svc.MAX_IDENTIFIER_LENGTH,
+    }
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(svc.api_reconcile_operation(oversized_operation_id, "artist-1", request=None))
+    assert exc.value.status_code == 422
+    assert exc.value.detail == {
+        "code": "field_too_long",
+        "field": "operation_id",
+        "max_length": svc.MAX_IDENTIFIER_LENGTH,
+    }
+
+
 @pytest.mark.parametrize("reconciled, initial_status, final_status", [
     (False, "executing", "succeeded"),
     (True, "unknown", "unknown"),
