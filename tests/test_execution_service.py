@@ -1599,3 +1599,30 @@ def test_operation_mutation_rejects_oversized_operation_id(services):
     with pytest.raises(HTTPException) as exc:
         svc.approve_operation("x" * (svc.MAX_IDENTIFIER_LENGTH + 1), artist_id="artist-1")
     assert exc.value.detail == {"code": "field_too_long", "field": "operation_id", "max_length": svc.MAX_IDENTIFIER_LENGTH}
+
+
+def test_reconciliation_helper_rejects_unbounded_operation_id_before_lookup(services, monkeypatch):
+    svc, _, _, _ = services
+    looked_up = False
+
+    def unexpected_lookup(operation_id):
+        nonlocal looked_up
+        looked_up = True
+        return {}
+
+    monkeypatch.setattr(svc, "_get_operation", unexpected_lookup)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            svc.reconcile_operation(
+                "operation-" + "x" * svc.MAX_IDENTIFIER_LENGTH,
+                artist_id="artist-1",
+            )
+        )
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail == {
+        "code": "field_too_long",
+        "field": "operation_id",
+        "max_length": svc.MAX_IDENTIFIER_LENGTH,
+    }
+    assert looked_up is False

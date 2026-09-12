@@ -1229,6 +1229,11 @@ def _find_gmail_message_by_rfc822_id(artist_id: str, message_id: str) -> Optiona
 
 
 async def reconcile_operation(operation_id: str, artist_id: Optional[str] = None) -> dict:
+    # Keep the service boundary consistent with execution and every other
+    # operation mutation. The HTTP route validates this path too, but the
+    # helper is also used by local recovery/test flows and must fail closed
+    # before querying the durable ledger.
+    operation_id = _require_bounded_string(operation_id, "operation_id", MAX_IDENTIFIER_LENGTH)
     operation = _get_operation(operation_id)
     if not operation:
         raise HTTPException(status_code=404, detail="Operation not found")
