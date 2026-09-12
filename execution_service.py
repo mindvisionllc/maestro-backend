@@ -1317,6 +1317,9 @@ def list_operations(
         scoped_artist_id = require_artist_scope(request, artist_id)
     except ArtistAuthError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    scoped_artist_id = _require_bounded_string(
+        scoped_artist_id, "artist_id", MAX_IDENTIFIER_LENGTH,
+    )
     operations = _list_operations(scoped_artist_id, limit=limit, status=status, before=before)
     return {
         "operations": operations,
@@ -1487,6 +1490,9 @@ async def api_execute_operation(
         scoped_artist_id = require_artist_scope(request, artist_id)
     except ArtistAuthError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    scoped_artist_id = _require_bounded_string(
+        scoped_artist_id, "artist_id", MAX_IDENTIFIER_LENGTH,
+    )
     return await execute_operation(operation_id, artist_id=scoped_artist_id)
 
 
@@ -1501,4 +1507,7 @@ async def api_reconcile_operation(
         scoped_artist_id = require_artist_scope(request, artist_id)
     except ArtistAuthError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    scoped_artist_id = _require_bounded_string(
+        scoped_artist_id, "artist_id", MAX_IDENTIFIER_LENGTH,
+    )
     return await reconcile_operation(operation_id, artist_id=scoped_artist_id)

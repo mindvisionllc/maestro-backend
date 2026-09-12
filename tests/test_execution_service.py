@@ -259,6 +259,31 @@ def test_readiness_rolls_back_when_history_event_cannot_be_recorded(services, mo
     assert [event["event_type"] for event in current["events"]] == ["created", "artist_approved"]
 
 
+def test_execution_routes_reject_unbounded_scoped_artist_identifiers(services, monkeypatch):
+    svc, _, _, _ = services
+    monkeypatch.setattr(svc, "require_artist_scope", lambda request, artist_id: artist_id)
+    oversized_artist_id = "artist-" + "x" * svc.MAX_IDENTIFIER_LENGTH
+
+    with pytest.raises(HTTPException) as exc:
+        svc.list_operations(oversized_artist_id, request=None)
+    assert exc.value.status_code == 422
+    assert exc.value.detail == {
+        "code": "field_too_long",
+        "field": "artist_id",
+        "max_length": svc.MAX_IDENTIFIER_LENGTH,
+    }
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(svc.api_execute_operation("missing", oversized_artist_id, request=None))
+    assert exc.value.status_code == 422
+    assert exc.value.detail["field"] == "artist_id"
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(svc.api_reconcile_operation("missing", oversized_artist_id, request=None))
+    assert exc.value.status_code == 422
+    assert exc.value.detail["field"] == "artist_id"
+
+
 @pytest.mark.parametrize("reconciled, initial_status, final_status", [
     (False, "executing", "succeeded"),
     (True, "unknown", "unknown"),
