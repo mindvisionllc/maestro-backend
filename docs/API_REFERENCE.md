@@ -75,6 +75,7 @@ Sorted alphabetically by path.
 | POST | `/api/operations/execute` | Yes (X-API-Key) | Execute Existing Approved Operation |
 | GET | `/api/operations` | Yes (X-API-Key) | List Operations |
 | GET | `/api/operations/{operation_id}` | Yes (X-API-Key) | Get Operation |
+| GET | `/api/operations/{operation_id}/events` | Yes (X-API-Key) | Get Operation Events |
 | POST | `/api/operations/{operation_id}/approve` | Yes (X-API-Key) | Approve Operation |
 | POST | `/api/operations/{operation_id}/ready` | Yes (X-API-Key) | Mark Operation Ready |
 | POST | `/api/operations/{operation_id}/cancel` | Yes (X-API-Key) | Cancel Operation |
@@ -705,6 +706,16 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 - **Path params:** `operation_id` (string, required)
 - **Query params:** `artist_id` (string, required)
 - **Response:** 200 — operation object
+
+#### GET /api/operations/{operation_id}/events
+
+- **Summary:** Get Operation Events — retrieve the authenticated artist's immutable lifecycle history, newest first
+- **Auth:** Yes (X-API-Key)
+- **Path params:** `operation_id` (string, required)
+- **Query params:** `artist_id` (string, required), `limit` (integer, 1–100, default 50), `before` (optional opaque cursor from the previous response)
+- **Response:** 200 — `{ operation_id, events, limit, next_before }`; `next_before` is returned only when another older page exists
+- **Security:** operation ownership is enforced and cross-artist access returns 404 without revealing existence; event metadata remains bounded and redacted
+- **Failures:** 404 when the operation is missing or not owned by the authenticated artist; 422 for invalid page limits or malformed/oversized cursors
 
 #### POST /api/operations/{operation_id}/reconcile
 

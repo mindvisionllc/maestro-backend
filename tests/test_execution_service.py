@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import json
 import importlib
 import sqlite3
 from unittest.mock import AsyncMock, MagicMock
@@ -1626,3 +1628,65 @@ def test_reconciliation_helper_rejects_unbounded_operation_id_before_lookup(serv
         "max_length": svc.MAX_IDENTIFIER_LENGTH,
     }
     assert looked_up is False
+
+
+def test_operation_event_history_route_pages_and_enforces_artist_scope(services, monkeypatch):
+    svc, _, _, _ = services
+    operation, _ = svc._create_or_get_operation(**_gmail_request(key="event-page"))
+    for index in range(3):
+        svc._record_operation_event(
+            operation["id"], operation["artist_id"], f"checkpoint-{index}", "pending",
+        )
+
+    def scoped_artist(_request, claimed_artist_id):
+        if claimed_artist_id != "artist-1":
+            from artist_identity import ArtistAuthError
+            raise ArtistAuthError("Artist resource not found")
+        return claimed_artist_id
+
+    monkeypatch.setattr(svc, "require_artist_scope", scoped_artist)
+    page = svc.get_operation_events(operation["id"], "artist-1", limit=2, request=object())
+    assert [event["event_type"] for event in page["events"]] == ["checkpoint-2", "checkpoint-1"]
+    assert page["next_before"]
+
+    older = svc.get_operation_events(
+        operation["id"], "artist-1", limit=2, before=page["next_before"], request=object(),
+    )
+    assert [event["event_type"] for event in older["events"]] == ["checkpoint-0", "created"]
+    assert older["next_before"] is None
+
+    with pytest.raises(HTTPException) as exc:
+        svc.get_operation_events(operation["id"], "artist-2", request=object())
+    assert exc.value.status_code == 404
+
+
+def test_operation_event_history_rejects_invalid_cursors_and_limits(services):
+    svc, _, _, _ = services
+    operation, _ = svc._create_or_get_operation(**_gmail_request(key="event-invalid"))
+
+    def cursor(value):
+        payload = json.dumps({"id": value}, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+    invalid_cursors = [
+        "not-base64!",
+        base64.urlsafe_b64encode(b"[]").decode().rstrip("="),
+        cursor(None),
+        cursor("12"),
+        cursor(True),
+        cursor(0),
+        cursor(2**63),
+        "x" * (svc.MAX_OPERATION_CURSOR_LENGTH + 1),
+    ]
+    for before in invalid_cursors:
+        with pytest.raises(HTTPException) as exc:
+            svc.get_operation_events(
+                operation["id"], "artist-1", limit=50, before=before, request=object(),
+            )
+        assert exc.value.status_code == 422
+        assert exc.value.detail == {"code": "invalid_operation_cursor"}
+
+    for limit in (0, 101):
+        with pytest.raises(HTTPException) as exc:
+            svc._list_operation_event_page(operation["id"], "artist-1", limit=limit)
+        assert exc.value.status_code == 422

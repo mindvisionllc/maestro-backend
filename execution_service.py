@@ -54,7 +54,9 @@ MAX_OPERATION_PAYLOAD_BYTES = 512 * 1024
 MAX_PROVIDER_RESULT_BYTES = 64 * 1024
 MAX_ERROR_DETAIL_LENGTH = 2048
 MAX_OPERATION_EVENTS = 100
+MAX_OPERATION_EVENT_PAGE = 100
 MAX_OPERATION_EVENT_METADATA_BYTES = 16 * 1024
+MAX_SQLITE_ROWID = 2**63 - 1
 
 SUPPORTED_SOCIAL_PLATFORMS = {
     "facebook": "facebook",
@@ -269,6 +271,80 @@ def _list_operation_events(operation_id: str, artist_id: str) -> list[dict]:
             "occurred_at": occurred_at,
         })
     return events
+
+
+def _decode_operation_event_cursor(before: str) -> int:
+    if len(before) > MAX_OPERATION_CURSOR_LENGTH:
+        raise HTTPException(status_code=422, detail={"code": "invalid_operation_cursor"})
+    try:
+        padded = before.encode("ascii") + b"=" * (-len(before) % 4)
+        decoded = json.loads(base64.b64decode(padded, altchars=b"-_", validate=True))
+        before_id = decoded["id"]
+        if (
+            not isinstance(decoded, dict)
+            or isinstance(before_id, bool)
+            or not isinstance(before_id, int)
+            or before_id < 1
+            or before_id > MAX_SQLITE_ROWID
+        ):
+            raise ValueError
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError,
+            UnicodeDecodeError, UnicodeEncodeError, binascii.Error, OverflowError):
+        raise HTTPException(status_code=422, detail={"code": "invalid_operation_cursor"})
+    return before_id
+
+
+def _list_operation_event_page(
+    operation_id: str,
+    artist_id: str,
+    *,
+    limit: int = 50,
+    before: Optional[str] = None,
+) -> tuple[list[dict], Optional[str]]:
+    """Return newest-first lifecycle events with a stable, artist-scoped cursor."""
+    if limit < 1 or limit > MAX_OPERATION_EVENT_PAGE:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+    where = ["operation_id=?", "artist_id=?"]
+    params: list[object] = [operation_id, artist_id]
+    if before:
+        before_id = _decode_operation_event_cursor(before)
+        where.append("id < ?")
+        params.append(before_id)
+
+    params.append(limit + 1)
+    conn = sqlite3.connect(str(_DB_PATH))
+    try:
+        rows = conn.execute(
+            """SELECT id, event_type, from_status, to_status, metadata, occurred_at
+               FROM execution_operation_events
+               WHERE """ + " AND ".join(where) + " ORDER BY id DESC LIMIT ?",
+            params,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    events = []
+    for event_id, event_type, from_status, to_status, metadata, occurred_at in rows:
+        try:
+            parsed_metadata = json.loads(metadata) if metadata else {}
+        except json.JSONDecodeError:
+            parsed_metadata = {}
+        events.append({
+            "event_type": event_type,
+            "from_status": from_status,
+            "to_status": to_status,
+            "metadata": parsed_metadata,
+            "occurred_at": occurred_at,
+        })
+    next_before = None
+    if has_more:
+        payload = json.dumps({"id": rows[-1][0]}, separators=(",", ":"))
+        next_before = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+    return events, next_before
+
+
 
 
 def _operation_event_count(operation_id: str, artist_id: str) -> int:
@@ -1483,6 +1559,36 @@ def get_operation(
     _require_operation_owner(operation, scoped_artist_id)
     return operation
 
+
+@router.get("/api/operations/{operation_id}/events", tags=["operations"])
+def get_operation_events(
+    operation_id: str,
+    artist_id: str,
+    limit: int = Query(50, ge=1, le=100),
+    before: Optional[str] = None,
+    request: Request = None,
+):
+    """Read the complete bounded lifecycle history without exposing other artists."""
+    operation_id = _require_bounded_string(operation_id, "operation_id", MAX_IDENTIFIER_LENGTH)
+    try:
+        scoped_artist_id = require_artist_scope(request, artist_id)
+    except ArtistAuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    scoped_artist_id = _require_bounded_string(scoped_artist_id, "artist_id", MAX_IDENTIFIER_LENGTH)
+
+    operation = _get_operation(operation_id)
+    if not operation:
+        raise HTTPException(status_code=404, detail="Operation not found")
+    _require_operation_owner(operation, scoped_artist_id)
+    events, next_before = _list_operation_event_page(
+        operation_id, scoped_artist_id, limit=limit, before=before,
+    )
+    return {
+        "operation_id": operation_id,
+        "events": events,
+        "limit": limit,
+        "next_before": next_before,
+    }
 
 
 @router.post("/api/operations/{operation_id}/execute", tags=["operations"])
