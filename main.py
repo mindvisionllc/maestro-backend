@@ -10,6 +10,7 @@ import base64
 import random
 import tempfile
 import asyncio
+import threading
 import hashlib
 import sqlite3
 from pathlib import Path
@@ -91,6 +92,10 @@ AUDIO_CACHE.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD_BYTES    = int(os.environ.get("MAX_UPLOAD_SIZE", str(25 * 1024 * 1024)))  # 25 MB default
 _ALLOWED_AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".ogg", ".webm"}
 TRANSCRIBE_TIMEOUT_SECONDS = float(os.environ.get("TRANSCRIBE_TIMEOUT_SECONDS", "120"))
+# Bounds a single /api/tts/synth Kokoro call. Normal observed latency is ~12-15s
+# (physical-device test); 25s gives headroom without leaving a caller waiting
+# anywhere near the ~60s+ hang seen when a synth call got stuck.
+KOKORO_SYNTH_TIMEOUT_SECONDS = float(os.environ.get("KOKORO_SYNTH_TIMEOUT_SECONDS", "25"))
 
 # Cloud integrations (optional — graceful degradation when absent)
 CLOUDINARY_CLOUD_NAME = os.environ.get("CLOUDINARY_CLOUD_NAME", "")
@@ -639,6 +644,16 @@ _kokoro = globals().get("_kokoro")
 _kokoro_available = globals().get("_kokoro_available")
 _kokoro_warmup_thread = globals().get("_kokoro_warmup_thread")
 _tts_lock = asyncio.Lock()
+# True mutual exclusion around the native kokoro.create() call, held by whichever
+# worker thread is actually running it. _tts_lock above only bounds how long an
+# asyncio caller waits (see KOKORO_SYNTH_TIMEOUT_SECONDS below); a caller that
+# gives up on timeout does NOT stop its worker thread — Python cannot safely
+# interrupt a running native call — so without this a second synth could start
+# concurrently against the same shared (not known to be thread-safe) Kokoro
+# model. Acquiring this lock inside the worker thread, independent of the
+# asyncio-level timeout, prevents that; a late-finishing orphaned call just
+# queues behind whichever call currently holds it.
+_kokoro_native_lock = threading.Lock()
 
 def get_kokoro():
     global _kokoro, _kokoro_available
@@ -671,7 +686,7 @@ def get_kokoro():
             _kokoro_available = False
     return _kokoro if _kokoro_available else None
 
-async def synthesize_speech(text: str, voice: str) -> Optional[bytes]:
+async def synthesize_speech(text: str, voice: str, call_id: str = "") -> Optional[bytes]:
     """Synthesize text → WAV bytes. Uses Kokoro locally, ElevenLabs on cloud."""
     if not text.strip():
         return None
@@ -685,15 +700,37 @@ async def synthesize_speech(text: str, voice: str) -> Optional[bytes]:
         return cache_file.read_bytes()
 
     async with _tts_lock:
+        t_start = time.monotonic()
         try:
             import soundfile as sf
             loop = asyncio.get_event_loop()
 
             def _synth():
-                samples, sr = kokoro.create(text, voice=voice, speed=1.1, lang="en-us")
-                return samples, sr
+                # See _kokoro_native_lock above: protects the native call even
+                # after the asyncio-level timeout below gives up and moves on.
+                with _kokoro_native_lock:
+                    return kokoro.create(text, voice=voice, speed=1.1, lang="en-us")
 
-            samples, sr = await loop.run_in_executor(None, _synth)
+            worker = loop.run_in_executor(None, _synth)
+            try:
+                # shield: a timeout must stop this caller from waiting, not the
+                # worker thread, which cannot be safely interrupted mid-call —
+                # same pattern as the /api/transcribe Whisper timeout above.
+                samples, sr = await asyncio.wait_for(
+                    asyncio.shield(worker), timeout=KOKORO_SYNTH_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                log.error("tts_kokoro_synth_timeout", extra={
+                    "event": "tts_kokoro_synth_timeout",
+                    "call_id": call_id,
+                    "timeout_seconds": KOKORO_SYNTH_TIMEOUT_SECONDS,
+                })
+                return None
+
+            log.info("tts_stage_duration", extra={
+                "event": "tts_stage_duration", "call_id": call_id,
+                "stage": "kokoro_synth", "duration_ms": round((time.monotonic() - t_start) * 1000),
+            })
 
             buf = io.BytesIO()
             sf.write(buf, samples, sr, format='WAV')
@@ -702,7 +739,7 @@ async def synthesize_speech(text: str, voice: str) -> Optional[bytes]:
             cache_file.write_bytes(audio_bytes)
             return audio_bytes
         except Exception as e:
-            log.error("tts_kokoro_synth_error", extra={"event": "tts_kokoro_synth_error", "error": str(e)})
+            log.error("tts_kokoro_synth_error", extra={"event": "tts_kokoro_synth_error", "error": str(e), "call_id": call_id})
             return None
 
 # ── ElevenLabs TTS (cloud fallback) ────────────────────────────────────────────
@@ -813,10 +850,10 @@ async def _synthesize_elevenlabs(text: str, voice: str) -> Optional[bytes]:
         log.error("tts_elevenlabs_exception", extra={"event": "tts_elevenlabs_exception", "error": msg})
         return None
 
-async def tts(text: str, voice: str) -> Optional[bytes]:
+async def tts(text: str, voice: str, call_id: str = "") -> Optional[bytes]:
     """Strip markdown, then synthesize."""
     clean = strip_markdown(text)
-    return await synthesize_speech(clean, voice) if clean else None
+    return await synthesize_speech(clean, voice, call_id) if clean else None
 
 # ── System prompt with prompt caching ──────────────────────────────────────────
 def load_skill(skill_dir: str) -> str:
@@ -13435,7 +13472,7 @@ async def tts_synth(req: TtsSynthRequest, request: Request):
         _cancelled_calls.pop(req.call_id, None)
         return JSONResponse({"audio": None, "cancelled": True}, status_code=200)
     _tts_last_error.clear()
-    audio_bytes = await tts(text, req.voice)
+    audio_bytes = await tts(text, req.voice, req.call_id)
     # Check again — call may have ended while synthesis was running
     if req.call_id and req.call_id in _cancelled_calls:
         _cancelled_calls.pop(req.call_id, None)
