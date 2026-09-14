@@ -8230,8 +8230,6 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
     History is trimmed before each call to prevent unbounded token growth.
     Voice sessions use a tighter cap than text sessions.
     """
-    if not ANTHROPIC_AVAILABLE:
-        raise HTTPException(status_code=503, detail="AI unavailable: ANTHROPIC_API_KEY not configured")
     agent = AGENTS_BY_ID.get(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -8247,6 +8245,10 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
     do_tts = tts_on.lower() == "true"
 
     if message == "__greet__":
+        # Static, handcrafted greeting — zero API calls, so it must not require
+        # ANTHROPIC_AVAILABLE. Previously this whole endpoint 503'd on a missing/
+        # invalid ANTHROPIC_API_KEY before ever reaching this branch, which broke
+        # the greeting even though it never calls Anthropic.
         greeting_text = _get_greeting(agent)
         print(f"[GREET] {agent['name']} — static greeting ({len(greeting_text)} chars)")
         async def _static_greet():
@@ -8257,8 +8259,12 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-    else:
-        has_history = len(history_list) > 0
+
+    # Every other turn (recorded speech, typed text) does need the LLM.
+    if not ANTHROPIC_AVAILABLE:
+        raise HTTPException(status_code=503, detail="AI unavailable: ANTHROPIC_API_KEY not configured")
+
+    has_history = len(history_list) > 0
 
     system_blocks = build_system_blocks(agent, artist_id=artist_id, voice_mode=do_tts, has_history=has_history, question=message)
 

@@ -58,6 +58,25 @@ def test_chat_stream_returns_503_without_key(monkeypatch, tmp_path):
     )
 
 
+def test_chat_stream_greet_succeeds_without_key(monkeypatch, tmp_path):
+    """The static __greet__ branch makes no LLM call and must succeed (200,
+    with the greeting text streamed) even when ANTHROPIC_API_KEY is absent —
+    the greeting is not AI-dependent, so it must not share the guard above."""
+    client = _load_app(monkeypatch, with_key=False, tmp_path=tmp_path)
+    resp = client.post("/api/chat_stream", json={
+        "agent_id":  "puppet-master",
+        "message":   "__greet__",
+        "artist_id": "test-artist",
+        "history":   "[]",
+        "tts":       False,
+    })
+    assert resp.status_code == 200, (
+        f"Expected 200 for the static greeting even without a key, got {resp.status_code}: {resp.text}"
+    )
+    assert '"type": "text"' in resp.text
+    assert '"type": "done"' in resp.text
+
+
 def test_handoff_returns_503_without_key(monkeypatch, tmp_path):
     """POST /api/handoff must return 503, not crash, when key is absent."""
     client = _load_app(monkeypatch, with_key=False, tmp_path=tmp_path)
