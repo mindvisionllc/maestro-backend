@@ -108,6 +108,22 @@ KOKORO_SYNTH_TIMEOUT_SECONDS = float(os.environ.get("KOKORO_SYNTH_TIMEOUT_SECOND
 ANTHROPIC_STREAM_TIMEOUT_SECONDS = float(os.environ.get("ANTHROPIC_STREAM_TIMEOUT_SECONDS", "40"))
 MARCUS_CREATE_TIMEOUT_SECONDS    = float(os.environ.get("MARCUS_CREATE_TIMEOUT_SECONDS", "40"))
 
+# ── Turn-stage instrumentation (diagnosis pass, VOICE_DIAGNOSIS.md Phase 2) ──────
+# Logging only — no behavior change. turn_id correlates one recorded voice turn's
+# transcribe -> chat_stream -> tts stages across three separate HTTP requests; it
+# is generated fresh per request when the caller doesn't supply one (an existing,
+# un-instrumented caller is unaffected — this is purely additive to each request
+# schema). Content is never logged, only character/byte counts and timings.
+def _new_turn_id() -> str:
+    return uuid.uuid4().hex[:12]
+
+def _stage_log(turn_id: str, stage: str, t0: float, **fields) -> None:
+    log.info("turn_stage", extra={
+        "event": "turn_stage", "turn_id": turn_id, "stage": stage,
+        "elapsed_ms": round((time.monotonic() - t0) * 1000, 1),
+        **fields,
+    })
+
 # Cloud integrations (optional — graceful degradation when absent)
 CLOUDINARY_CLOUD_NAME = os.environ.get("CLOUDINARY_CLOUD_NAME", "")
 ELEVENLABS_API_KEY    = os.environ.get("ELEVENLABS_API_KEY", "")
@@ -990,6 +1006,16 @@ def _check_env():
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not anthropic_key:
         log.warning("boot_warning", extra={"event": "boot_warning", "key": "ANTHROPIC_API_KEY", "detail": "AI agents will fail"})
+        # VOICE_DIAGNOSIS.md Phase 3/4.7: a structured log line alone was not loud
+        # enough — the confirmed physical-device incident ran for an entire test
+        # session against a backend missing this key with nobody the wiser until
+        # the artist's first recorded turn silently 503'd. Print unmissably to
+        # stdout too, same convention as the other operator-facing boot lines
+        # above (e.g. "/data is writable"). See also /api/health's ai_available
+        # field, which is how the CLIENT finds out — this line is for whoever is
+        # watching this process start.
+        print("⚠️  ANTHROPIC_API_KEY is not set — every real AI turn (chat_stream) will 503. "
+              "Static greetings will still work and MUST NOT be read as a sign this is healthy.")
     else:
         log.info("boot_ok", extra={"event": "boot_ok", "key": "ANTHROPIC_API_KEY", "detail": "present"})
 
@@ -1558,8 +1584,10 @@ def _delete_transcription_temp(path: str):
 
 
 @app.post("/api/transcribe")
-async def transcribe(audio: UploadFile = File(...), request: Request = None):
+async def transcribe(audio: UploadFile = File(...), turn_id: str = Form(""), request: Request = None):
     tmp = None
+    turn_id = turn_id.strip() or _new_turn_id()  # diagnostic correlation id only — see _stage_log
+    t0 = time.monotonic()
     try:
         _authenticated_artist_id(request)
         filename = audio.filename or "voice.m4a"
@@ -1585,6 +1613,7 @@ async def transcribe(audio: UploadFile = File(...), request: Request = None):
                 status_code=413,
                 detail=f"Upload exceeds {MAX_UPLOAD_BYTES // (1024*1024)} MB limit",
             )
+        _stage_log(turn_id, "upload_received", t0, bytes=len(data))
 
         model = get_whisper()
         print(f"[TRANSCRIBE] received {len(data)} bytes, filename={filename}, ext={ext}")
@@ -1593,6 +1622,7 @@ async def transcribe(audio: UploadFile = File(...), request: Request = None):
             tmp = f.name
         loop   = asyncio.get_event_loop()
         transcribe_path = tmp
+        _stage_log(turn_id, "stt_start", t0)
         worker = loop.run_in_executor(None, lambda: model.transcribe(transcribe_path))
         try:
             # Shield keeps the worker future observable after the request timeout,
@@ -1604,14 +1634,18 @@ async def transcribe(audio: UploadFile = File(...), request: Request = None):
         except asyncio.TimeoutError:
             worker.add_done_callback(lambda _: _delete_transcription_temp(transcribe_path))
             tmp = None
+            _stage_log(turn_id, "stt_done", t0, outcome="timeout")
             raise
         except asyncio.CancelledError:
             worker.add_done_callback(lambda _: _delete_transcription_temp(transcribe_path))
             tmp = None
+            _stage_log(turn_id, "stt_done", t0, outcome="cancelled")
             raise
         text = result["text"].strip()
         print(f"[TRANSCRIBE] result: {repr(text)}")
-        return {"text": text}
+        _stage_log(turn_id, "stt_done", t0, chars=len(text), outcome="ok")
+        _stage_log(turn_id, "response_sent", t0, stage_of="transcribe")
+        return {"text": text, "turn_id": turn_id}
     except asyncio.TimeoutError:
         print("[TRANSCRIBE] ERROR: provider timeout")
         raise HTTPException(status_code=504, detail="Transcription timed out")
@@ -1773,13 +1807,28 @@ MARCUS_TOOLS = [
     },
     {
         "name": "send_pitch_email",
-        "description": "Draft and send a pitch email to a curator on behalf of the artist",
+        "description": (
+            "Draft and send a pitch email to a curator on behalf of the artist. "
+            "This has a real external effect — an actual email leaves the artist's "
+            "account. The FIRST call for a given pitch must omit `confirmed` (or "
+            "pass it false): this drafts the email and returns it to you so you can "
+            "read the exact subject/body back to the artist and ask them to confirm "
+            "before anything is sent. Only call it a second time, with the SAME "
+            "curator_id/subject/body and `confirmed: true`, after the artist has "
+            "clearly said to go ahead — never set confirmed on the first attempt, "
+            "and never send on an ordinary advisory turn without that explicit "
+            "back-and-forth."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "curator_id": {"type": "string"},
                 "subject": {"type": "string"},
                 "body": {"type": "string"},
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "True only after the artist has explicitly approved this exact draft in this conversation. Omit or false on the first call.",
+                },
             },
             "required": ["curator_id", "subject", "body"],
         },
@@ -1827,6 +1876,7 @@ async def _execute_marcus_tool(name: str, tool_input: dict, artist_id: str) -> t
         curator_id = (tool_input.get("curator_id") or "").strip()
         subject    = tool_input.get("subject") or ""
         body       = tool_input.get("body") or ""
+        confirmed  = tool_input.get("confirmed") is True
         curator    = pitch_service._db_get_curator(curator_id)
         if not curator:
             return (
@@ -1836,6 +1886,32 @@ async def _execute_marcus_tool(name: str, tool_input: dict, artist_id: str) -> t
             )
         to = curator.get("contact_email", "")
         cname = curator.get("name", curator_id)
+        # VOICE_DIAGNOSIS.md Phase 4.3: a consequential, real-external-effect tool
+        # must never fire on an ordinary advisory turn without an explicit
+        # confirmation exchange — Anthropic deciding stop_reason=tool_use is not
+        # artist consent. No email is sent here; the model gets the draft back and
+        # is instructed (see MARCUS_TOOLS' description) to read it to the artist
+        # and only call this again, unchanged apart from confirmed=true, once the
+        # artist has actually said to go ahead. Nothing above this line has any
+        # external side effect, so drafting is always safe to do eagerly.
+        if not confirmed:
+            return (
+                {
+                    "status": "draft_ready",
+                    "curator": cname,
+                    "to": to,
+                    "subject": subject,
+                    "body": body,
+                    "message": (
+                        "This is a DRAFT — nothing has been sent. Read the subject and "
+                        "body back to the artist and ask them to confirm. Only call "
+                        "send_pitch_email again, with the same curator_id/subject/body "
+                        "and confirmed=true, after they clearly say to send it."
+                    ),
+                },
+                {"input": f"curator={cname} subject={subject[:40]}", "result": "draft_ready (unconfirmed)"},
+                False,
+            )
         try:
             sent = await pitch_service.send_email(artist_id, to, subject, body)
             return (
@@ -8276,6 +8352,7 @@ class ChatStreamRequest(BaseModel):
     artist_id: str    = ""
     history:   str    = "[]"   # JSON-encoded array
     tts:       bool   = True
+    turn_id:   str    = ""     # diagnostic correlation id only — see _stage_log; optional, back-compatible
 
 @app.post("/api/chat_stream")
 async def chat_stream(req: ChatStreamRequest, request: Request):
@@ -8284,6 +8361,8 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
     artist_id = _require_artist_scope(request, req.artist_id)
     history   = req.history
     tts_on    = "true" if req.tts else "false"
+    turn_id   = req.turn_id.strip() or _new_turn_id()
+    t0        = time.monotonic()
     """
     Streaming endpoint. Yields SSE events:
       {type:"text",  text:"..."}           — sentence of text as it arrives
@@ -8371,6 +8450,8 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
             nonlocal full_text
             buf = ""
             route_cut = False
+            first_chunk_seen = False
+            _stage_log(turn_id, "llm_start", t0, agent_id=agent_id)
             try:
                 async with async_client.messages.stream(
                     model=model,
@@ -8394,6 +8475,9 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
                             )
                         except StopAsyncIteration:
                             break
+                        if not first_chunk_seen:
+                            first_chunk_seen = True
+                            _stage_log(turn_id, "llm_first_token", t0)
                         full_text += chunk
                         buf       += chunk
                         while True:
@@ -8500,7 +8584,9 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
             })
         if experts_event:
             yield sse(experts_event)
+        _stage_log(turn_id, "llm_done", t0, chars=len(full_text))
         yield sse({"type": "done", "full_text": full_text})
+        _stage_log(turn_id, "response_sent", t0, stage_of="chat_stream")
 
         # Persist exchange to history DB (skip greeting pings)
         if full_text and message != "__greet__":
@@ -8523,6 +8609,8 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
 
         async def _marcus_producer():
             nonlocal full_text, actions_taken, gmail_not_connected
+            _stage_log(turn_id, "llm_start", t0, agent_id=agent_id)
+            first_response_seen = False
             try:
                 loop_messages = list(messages)
                 final_text    = ""
@@ -8543,6 +8631,9 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
                         ),
                         timeout=MARCUS_CREATE_TIMEOUT_SECONDS,
                     )
+                    if not first_response_seen:
+                        first_response_seen = True
+                        _stage_log(turn_id, "llm_first_token", t0, note="non-streaming create() — first round-trip, not a token")
                     blocks    = list(getattr(resp, "content", []) or [])
                     tool_uses = [b for b in blocks if getattr(b, "type", None) == "tool_use"]
                     text_parts = [getattr(b, "text", "") for b in blocks
@@ -8553,9 +8644,11 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
                         loop_messages.append({"role": "assistant", "content": blocks})
                         results_content = []
                         for tu in tool_uses:
+                            _stage_log(turn_id, "tool_start", t0, tool_name=tu.name)
                             result, summary, gnc = await _execute_marcus_tool(
                                 tu.name, getattr(tu, "input", {}) or {}, artist_id,
                             )
+                            _stage_log(turn_id, "tool_done", t0, tool_name=tu.name, result=summary["result"])
                             if gnc:
                                 gmail_not_connected = True
                             actions_taken.append({
@@ -8689,7 +8782,9 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
             })
         except Exception:
             pass
+        _stage_log(turn_id, "llm_done", t0, chars=len(full_text))
         yield sse({"type": "done", "full_text": full_text})
+        _stage_log(turn_id, "response_sent", t0, stage_of="chat_stream_marcus")
 
         if full_text and message != "__greet__":
             asyncio.create_task(_save_exchange(artist_id, agent_id, message, full_text))
@@ -13502,6 +13597,7 @@ class TtsSynthRequest(BaseModel):
     voice:   str = "am_onyx"
     call_id: str = ""
     artist_id: str = ""
+    turn_id: str = ""   # diagnostic correlation id only — see _stage_log; optional, back-compatible
 
 class TtsCancelRequest(BaseModel):
     call_id: str
@@ -13539,14 +13635,21 @@ async def tts_synth(req: TtsSynthRequest, request: Request):
         _cancelled_calls.pop(req.call_id, None)
         return JSONResponse({"audio": None, "cancelled": True}, status_code=200)
     _tts_last_error.clear()
+    turn_id = req.turn_id.strip() or req.call_id.strip() or _new_turn_id()
+    t0 = time.monotonic()
+    _stage_log(turn_id, "tts_start", t0, chars=len(text))
     audio_bytes = await tts(text, req.voice, req.call_id)
     # Check again — call may have ended while synthesis was running
     if req.call_id and req.call_id in _cancelled_calls:
         _cancelled_calls.pop(req.call_id, None)
+        _stage_log(turn_id, "tts_done", t0, outcome="cancelled")
         return JSONResponse({"audio": None, "cancelled": True}, status_code=200)
     if audio_bytes:
+        _stage_log(turn_id, "tts_done", t0, bytes=len(audio_bytes), outcome="ok")
+        _stage_log(turn_id, "response_sent", t0, stage_of="tts_synth")
         return {"audio": base64.b64encode(audio_bytes).decode()}
     detail = _tts_last_error.get("detail", "unknown")
+    _stage_log(turn_id, "tts_done", t0, outcome="failed", detail=str(detail))
     return JSONResponse({"audio": None, "error": "TTS unavailable", "detail": detail}, status_code=503)
 
 @app.get("/api/tts/status")
@@ -13559,7 +13662,17 @@ async def tts_status():
 @app.get("/api/health")
 async def api_health():
     tts_engine = "kokoro" if get_kokoro() else ("elevenlabs" if ELEVENLABS_API_KEY else "none")
-    return {"status": "ok", "version": "2.2.1", "tts": tts_engine, "agents": len(AGENTS)}
+    # ai_available: surfaced so the client can show a degraded-mode indicator
+    # BEFORE the artist spends a turn finding out — the static __greet__
+    # branch (cdd0c8d) succeeds regardless of this, so it must never again be
+    # the only signal of LLM health (VOICE_DIAGNOSIS.md Phase 4.7). Presence-
+    # only, same as _check_env()'s own boot check — a malformed-but-present
+    # key still reports available here and only surfaces on the first real
+    # Anthropic call (see chat_stream's own error path).
+    return {
+        "status": "ok", "version": "2.2.1", "tts": tts_engine, "agents": len(AGENTS),
+        "ai_available": ANTHROPIC_AVAILABLE,
+    }
 
 app.mount("/static", StaticFiles(directory=str(_BASE / "static"), html=True), name="static")
 

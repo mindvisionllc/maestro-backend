@@ -14,6 +14,7 @@ Prove that, in /api/chat_stream:
 Everything is in-process and deterministic. NO network / LLM / Gmail calls — the
 Anthropic client is faked and every pitch_service boundary is monkeypatched.
 """
+import asyncio
 import importlib
 import json
 from unittest.mock import MagicMock, patch
@@ -83,6 +84,13 @@ def _parse_sse(body: str) -> list:
 
 
 # ── (a) Marcus runs the tool loop and surfaces actions_taken ─────────────────
+# send_pitch_email is gated (VOICE_DIAGNOSIS.md Phase 4.3 — a consequential,
+# real-external-effect tool must never fire on an ordinary advisory turn
+# without an explicit confirmation exchange): the first call (no `confirmed`)
+# only drafts; a second call, unchanged apart from confirmed=true, actually
+# sends. This test scripts both round-trips to prove the full, intended
+# conversational flow end-to-end. See test_marcus_send_pitch_email_requires_
+# explicit_confirmation below for the narrower, single-behavior guarantee.
 
 def test_marcus_tool_loop_invokes_functions_and_emits_actions(monkeypatch, tmp_path):
     m = _load_main(monkeypatch, tmp_path)
@@ -109,13 +117,17 @@ def test_marcus_tool_loop_invokes_functions_and_emits_actions(monkeypatch, tmp_p
     monkeypatch.setattr(m.pitch_service, "_db_get_curator",   fake_get_curator)
     monkeypatch.setattr(m.pitch_service, "send_email",        fake_send_email)
 
-    # Scripted Anthropic responses: search_curators → send_pitch_email → final text.
+    # Scripted Anthropic responses: search_curators → send_pitch_email (draft,
+    # unconfirmed) → send_pitch_email (confirmed=true) → final text.
     responses = [
         _Resp([_Block("tool_use", name="search_curators",
                       input={"genre": "indie pop"}, id="t1")], "tool_use"),
         _Resp([_Block("tool_use", name="send_pitch_email",
                       input={"curator_id": "cur-1", "subject": "Sub", "body": "Body"},
                       id="t2")], "tool_use"),
+        _Resp([_Block("tool_use", name="send_pitch_email",
+                      input={"curator_id": "cur-1", "subject": "Sub", "body": "Body", "confirmed": True},
+                      id="t3")], "tool_use"),
         _Resp([_Block("text", text="Done — I found a curator and sent your pitch.")],
               "end_turn"),
     ]
@@ -143,9 +155,10 @@ def test_marcus_tool_loop_invokes_functions_and_emits_actions(monkeypatch, tmp_p
     events = _parse_sse(resp.text)
     types  = [e["type"] for e in events]
 
-    # Both internal functions invoked with correct args.
+    # Both internal functions invoked with correct args — send_email exactly
+    # once, only on the confirmed call.
     assert list_calls == [{"genre": "indie pop", "tier": ""}], list_calls
-    assert get_calls  == ["cur-1"], get_calls
+    assert get_calls  == ["cur-1", "cur-1"], get_calls
     assert send_calls == [{
         "artist_id": "artist-9", "to": "c@example.com",
         "subject": "Sub", "body": "Body",
@@ -157,13 +170,71 @@ def test_marcus_tool_loop_invokes_functions_and_emits_actions(monkeypatch, tmp_p
     assert types.index("actions") < types.index("done")
     actions_evt = next(e for e in events if e["type"] == "actions")
     tools_used  = [a["tool"] for a in actions_evt["actions_taken"]]
-    assert tools_used == ["search_curators", "send_pitch_email"], tools_used
+    assert tools_used == ["search_curators", "send_pitch_email", "send_pitch_email"], tools_used
+    assert actions_evt["actions_taken"][1]["result"] == "draft_ready (unconfirmed)"
+    assert actions_evt["actions_taken"][2]["result"] == "email sent"
     assert actions_evt["gmail_not_connected"] is False
     assert "Done" in next(e for e in events if e["type"] == "done")["full_text"]
-    # Three create() round-trips: search, send, final.
-    assert len(create_calls) == 3
+    # Four create() round-trips: search, draft, confirmed send, final.
+    assert len(create_calls) == 4
     # Tools were passed on every Marcus create call.
     assert all(kw.get("tools") == m.MARCUS_TOOLS for kw in create_calls)
+
+
+# ── (a2) send_pitch_email is gated behind explicit confirmation ─────────────
+
+def test_marcus_send_pitch_email_requires_explicit_confirmation(monkeypatch, tmp_path):
+    """The narrow guarantee behind Phase 4.3: calling the tool WITHOUT
+    confirmed=true must never reach pitch_service.send_email — no real email
+    can leave on an ordinary advisory turn just because the model decided to.
+    """
+    m = _load_main(monkeypatch, tmp_path)
+    monkeypatch.setattr(m.pitch_service, "_db_get_curator",
+                        lambda cid: {"id": cid, "name": "Test Curator", "contact_email": "c@example.com"})
+
+    send_calls = []
+    async def fake_send_email(artist_id, to, subject, body):
+        send_calls.append(1)
+        return {"message_id": "should-not-happen"}
+    monkeypatch.setattr(m.pitch_service, "send_email", fake_send_email)
+
+    result, summary, gmail_not_connected = asyncio.run(
+        m._execute_marcus_tool(
+            "send_pitch_email",
+            {"curator_id": "cur-1", "subject": "S", "body": "B"},  # no `confirmed` at all
+            "artist-1",
+        )
+    )
+
+    assert send_calls == [], "send_email must not be called without confirmed=true"
+    assert result["status"] == "draft_ready"
+    assert result["subject"] == "S" and result["body"] == "B"
+    assert summary["result"] == "draft_ready (unconfirmed)"
+    assert gmail_not_connected is False
+
+    # confirmed=False is explicitly the same as omitting it.
+    send_calls.clear()
+    result2, _, _ = asyncio.run(
+        m._execute_marcus_tool(
+            "send_pitch_email",
+            {"curator_id": "cur-1", "subject": "S", "body": "B", "confirmed": False},
+            "artist-1",
+        )
+    )
+    assert send_calls == []
+    assert result2["status"] == "draft_ready"
+
+    # Only confirmed=true (the literal boolean, not a truthy string) sends.
+    result3, summary3, _ = asyncio.run(
+        m._execute_marcus_tool(
+            "send_pitch_email",
+            {"curator_id": "cur-1", "subject": "S", "body": "B", "confirmed": True},
+            "artist-1",
+        )
+    )
+    assert send_calls == [1]
+    assert result3["status"] == "sent"
+    assert summary3["result"] == "email sent"
 
 
 # ── (b) Non-Marcus agent never gets tools, takes the unchanged path ──────────
@@ -215,8 +286,12 @@ def test_marcus_gmail_not_connected_is_handled(monkeypatch, tmp_path):
     monkeypatch.setattr(m.pitch_service, "send_email", fake_send_email)
 
     responses = [
+        # confirmed=True — this test is about GmailNotConnected handling, not
+        # the confirmation gate (see test_marcus_send_pitch_email_requires_
+        # explicit_confirmation for that); scripting an already-confirmed call
+        # reaches send_email directly, same as before this gate existed.
         _Resp([_Block("tool_use", name="send_pitch_email",
-                      input={"curator_id": "cur-1", "subject": "S", "body": "B"},
+                      input={"curator_id": "cur-1", "subject": "S", "body": "B", "confirmed": True},
                       id="t1")], "tool_use"),
         _Resp([_Block("text", text="You need to connect Gmail first.")], "end_turn"),
     ]

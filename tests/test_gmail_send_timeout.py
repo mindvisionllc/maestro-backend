@@ -186,10 +186,13 @@ def test_marcus_tool_handles_gmail_send_timeout_gracefully(tmp_path, monkeypatch
     monkeypatch.setattr(m.pitch_service, "_db_get_curator", fake_get_curator_sync)
     monkeypatch.setattr(m.pitch_service, "send_email", fake_send_email)
 
+    # confirmed=True — this test is about GmailSendTimeout handling, not the
+    # Phase 4.3 confirmation gate (see test_marcus_send_pitch_email_requires_
+    # explicit_confirmation in test_marcus_tool_use.py for that).
     result, summary, gmail_not_connected = asyncio.run(
         m._execute_marcus_tool(
             "send_pitch_email",
-            {"curator_id": "cur-1", "subject": "S", "body": "B"},
+            {"curator_id": "cur-1", "subject": "S", "body": "B", "confirmed": True},
             "artist-1",
         )
     )
