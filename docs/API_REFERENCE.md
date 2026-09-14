@@ -1007,17 +1007,26 @@ Supported action types are `gmail.send` and `social.buffer.schedule`. Pitch, PR,
 
 #### POST /api/auth/send-otp
 
-- **Summary:** Send Otp — send a 6-digit OTP via Twilio SMS
+- **Summary:** Send Otp — start a Twilio Verify SMS verification (requires
+  `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_VERIFY_SERVICE_SID`)
 - **Auth:** Yes (X-API-Key)
-- **Request body:** `phone` (string, required)
-- **Response:** 200 — `{ sent: true }`
+- **Request body:** `phone` (string, required) — E.164 (`+…`), or a 10/11-digit NANP number
+  which is canonicalized to `+1…`
+- **Response:** 200 — `{ status: "ok", message: "Code sent" }`
+- **Errors:** `detail` is `{ code, message, retry_after? }` with `code` one of
+  `invalid_phone` (400), `send_cooldown` / `send_limit` (429, `Retry-After` header),
+  `auth_not_configured` / `provider_unavailable` (503). Provider exceptions, identifiers,
+  and full phone numbers are never returned.
 
 #### POST /api/auth/verify-otp
 
-- **Summary:** Verify Otp — verify a 6-digit OTP; consumes the code on success
+- **Summary:** Verify Otp — check the code with Twilio Verify; a signed artist session is
+  issued only for an explicitly `approved` provider result
 - **Auth:** Yes (X-API-Key)
 - **Request body:** `phone` (string, required), `code` (string, required)
-- **Response:** 200 — `{ verified: true }` or error
+- **Response:** 200 — `{ valid: true, artist_id, access_token, … }` or
+  `{ valid: false, error_code, reason }` with `error_code` one of `invalid_code`,
+  `expired_code`, `too_many_attempts`; 503 `{ code: "auth_not_configured" | "provider_unavailable" }`
 
 #### POST /api/notifications/register
 

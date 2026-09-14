@@ -147,7 +147,7 @@ Required env vars for this backend:
 - CLOUDINARY_CLOUD_NAME
 - TWILIO_ACCOUNT_SID
 - TWILIO_AUTH_TOKEN (must be exactly 32 lowercase hex chars)
-- TWILIO_PHONE_NUMBER
+- TWILIO_VERIFY_SERVICE_SID (Twilio Verify service; OTP no longer uses a From number)
 - STRIPE_SECRET_KEY
 - STRIPE_WEBHOOK_SECRET
 - OPENAI_API_KEY (usage unresolved: verified 2026-08-28 that no OpenAI-TTS fallback code exists

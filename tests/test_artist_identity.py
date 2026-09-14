@@ -26,6 +26,8 @@ def identity_client(monkeypatch, tmp_path):
     monkeypatch.setenv("PLMKR_SESSION_SECRET", SESSION_SECRET)
     monkeypatch.setenv("PLMKR_IDENTITY_SECRET", IDENTITY_SECRET)
     monkeypatch.setenv("SMS_OTP_DEV_BYPASS", "true")
+    monkeypatch.delenv("TWILIO_VERIFY_SERVICE_SID", raising=False)
+    monkeypatch.delenv("TWILIO_VERIFY_SID", raising=False)
     monkeypatch.setenv("PLMKR_OTP_SEND_COOLDOWN_SECONDS", "0")
     monkeypatch.setenv("PLMKR_OTP_MAX_SENDS_PER_WINDOW", "100")
     monkeypatch.delenv("RAILWAY_ENVIRONMENT", raising=False)

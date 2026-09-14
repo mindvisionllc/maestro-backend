@@ -2,8 +2,9 @@
 R-17 — Twilio auth token validation + SMS_OTP_DEV_BYPASS guard.
 
 Tests:
-- Malformed TWILIO_AUTH_TOKEN causes send-otp to return 503 (not store OTP first)
-- OTP is NOT stored when token is malformed (store-before-validate bug fixed)
+- Malformed TWILIO_AUTH_TOKEN causes send-otp to return a sanitized 503 (not store OTP first)
+- No pending verification is stored when provider config is malformed
+- SMS_OTP_DEV_BYPASS=true alongside a Verify service SID → sys.exit(1) at boot
 - SMS_OTP_DEV_BYPASS=true on Railway → sys.exit(1) at boot
 - SMS_OTP_DEV_BYPASS=true in local dev → send-otp succeeds with code 000000
 - Normal flow (valid or missing Twilio) is unaffected when bypass disabled
@@ -30,6 +31,8 @@ def _build_client(monkeypatch, tmp_path, **extra_env):
     monkeypatch.setenv("APP_BASE_URL",      "https://test.example.com")
     monkeypatch.delenv("RAILWAY_ENVIRONMENT", raising=False)
     monkeypatch.delenv("SMS_OTP_DEV_BYPASS",  raising=False)
+    for k in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_VERIFY_SERVICE_SID", "TWILIO_VERIFY_SID"):
+        monkeypatch.delenv(k, raising=False)
     for k, v in extra_env.items():
         if v is None:
             monkeypatch.delenv(k, raising=False)
@@ -47,12 +50,12 @@ def _build_client(monkeypatch, tmp_path, **extra_env):
 # ── Tests ──────────────────────────────────────────────────────────────────────
 
 def test_malformed_twilio_token_returns_503(monkeypatch, tmp_path):
-    """Malformed TWILIO_AUTH_TOKEN causes send-otp to return 503."""
+    """Malformed TWILIO_AUTH_TOKEN causes send-otp to return a sanitized 503 (names only, no values)."""
     client, _ = _build_client(
         monkeypatch, tmp_path,
-        TWILIO_ACCOUNT_SID="AC" + "x" * 32,
+        TWILIO_ACCOUNT_SID="AC" + "a" * 32,
         TWILIO_AUTH_TOKEN="not-32-hex",
-        TWILIO_PHONE_NUMBER="+15550001234",
+        TWILIO_VERIFY_SERVICE_SID="VA" + "a" * 32,
     )
     resp = client.post(
         "/api/auth/send-otp",
@@ -60,16 +63,19 @@ def test_malformed_twilio_token_returns_503(monkeypatch, tmp_path):
         headers={"X-API-Key": _PLMKR_KEY},
     )
     assert resp.status_code == 503
-    assert "32" in resp.json().get("detail", "")
+    detail = resp.json().get("detail")
+    assert detail["code"] == "auth_not_configured"
+    assert "not-32-hex" not in resp.text
+    assert "AC" + "a" * 32 not in resp.text
 
 
 def test_malformed_token_does_not_store_otp(monkeypatch, tmp_path):
-    """OTP must NOT be stored in _otp_store when auth token is malformed (store-before-validate fix)."""
+    """No pending verification is stored when provider config validation fails."""
     client, m = _build_client(
         monkeypatch, tmp_path,
-        TWILIO_ACCOUNT_SID="AC" + "x" * 32,
+        TWILIO_ACCOUNT_SID="AC" + "a" * 32,
         TWILIO_AUTH_TOKEN="bad",
-        TWILIO_PHONE_NUMBER="+15550001234",
+        TWILIO_VERIFY_SERVICE_SID="VA" + "a" * 32,
     )
     phone = "+15559990001"
     # Clear any leftover state from previous test
@@ -77,11 +83,8 @@ def test_malformed_token_does_not_store_otp(monkeypatch, tmp_path):
 
     client.post("/api/auth/send-otp", json={"phone": phone}, headers={"X-API-Key": _PLMKR_KEY})
 
-    # Normalized phone is +<digits>
-    import re
-    norm = "+" + re.sub(r"\D", "", phone)
-    assert norm not in m._otp_store, (
-        "OTP must not be stored when Twilio token validation fails"
+    assert m._normalize_phone(phone) not in m._otp_store, (
+        "pending verification must not be stored when Twilio config validation fails"
     )
 
 
@@ -138,7 +141,8 @@ def test_bypass_disabled_normal_flow_returns_503_when_twilio_unconfigured(monkey
         SMS_OTP_DEV_BYPASS=None,
         TWILIO_ACCOUNT_SID=None,
         TWILIO_AUTH_TOKEN=None,
-        TWILIO_PHONE_NUMBER=None,
+        TWILIO_VERIFY_SERVICE_SID=None,
+        TWILIO_VERIFY_SID=None,
     )
     resp = client.post(
         "/api/auth/send-otp",
@@ -146,3 +150,22 @@ def test_bypass_disabled_normal_flow_returns_503_when_twilio_unconfigured(monkey
         headers={"X-API-Key": _PLMKR_KEY},
     )
     assert resp.status_code == 503
+
+
+def test_sms_otp_dev_bypass_with_verify_sid_calls_sys_exit(monkeypatch, tmp_path):
+    """SMS_OTP_DEV_BYPASS=true + TWILIO_VERIFY_SERVICE_SID set → sys.exit(1): bypass never shadows Verify."""
+    monkeypatch.setenv("SMS_OTP_DEV_BYPASS",         "true")
+    monkeypatch.setenv("TWILIO_VERIFY_SERVICE_SID",  "VA" + "a" * 32)
+    monkeypatch.delenv("RAILWAY_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("DB_PATH",             str(tmp_path / "test.db"))
+    monkeypatch.setenv("DATABASE_URL",        "")
+    monkeypatch.setenv("AUDIO_CACHE_DIR",     str(tmp_path / "audio_cache"))
+    monkeypatch.setenv("ARTISTS_DIR",         str(tmp_path / "artists"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY",   "sk-test")
+
+    with pytest.raises(SystemExit) as exc_info:
+        with patch("whisper.load_model", return_value=MagicMock()):
+            import main as m
+            importlib.reload(m)
+
+    assert exc_info.value.code == 1

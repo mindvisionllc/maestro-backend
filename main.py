@@ -918,19 +918,21 @@ def sse(data: dict) -> str:
 # ── Startup env checks ─────────────────────────────────────────────────────────
 def _check_env():
     import re
-    sid   = os.environ.get("TWILIO_ACCOUNT_SID", "")
-    token = os.environ.get("TWILIO_AUTH_TOKEN", "")
-    phone = os.environ.get("TWILIO_PHONE_NUMBER", "")
+    sid   = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
+    token = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
+    verify_sid = (os.environ.get("TWILIO_VERIFY_SERVICE_SID") or os.environ.get("TWILIO_VERIFY_SID") or "").strip()
     ok = True
-    if not sid:
-        log.warning("boot_warning", extra={"event": "boot_warning", "key": "TWILIO_ACCOUNT_SID", "detail": "SMS OTP disabled"})
+    if not re.fullmatch(r'AC[0-9a-fA-F]{32}', sid):
+        log.warning("boot_warning", extra={"event": "boot_warning", "key": "TWILIO_ACCOUNT_SID",
+                    "detail": "missing or malformed — SMS OTP disabled"})
         ok = False
-    if not re.fullmatch(r'[0-9a-f]{32}', token.strip().lower()):
+    if not re.fullmatch(r'[0-9a-f]{32}', token.lower()):
         log.warning("boot_warning", extra={"event": "boot_warning", "key": "TWILIO_AUTH_TOKEN",
                     "detail": "invalid format — must be 32 lowercase hex chars; get from console.twilio.com"})
         ok = False
-    if not phone:
-        log.warning("boot_warning", extra={"event": "boot_warning", "key": "TWILIO_PHONE_NUMBER", "detail": "SMS OTP disabled"})
+    if not re.fullmatch(r'VA[0-9a-fA-F]{32}', verify_sid):
+        log.warning("boot_warning", extra={"event": "boot_warning", "key": "TWILIO_VERIFY_SERVICE_SID",
+                    "detail": "missing or malformed — SMS OTP (Twilio Verify) disabled"})
         ok = False
     if ok:
         log.info("boot_ok", extra={"event": "boot_ok", "key": "TWILIO", "detail": "env vars valid"})
@@ -13581,8 +13583,11 @@ async def lookup_artist(name: str, request: Request):
 
 
 
-# ── SMS OTP auth ───────────────────────────────────────────────────────────────
-# In-memory store: { normalized_phone: { "otp": "123456", "expires": float } }
+# ── SMS OTP auth (Twilio Verify) ───────────────────────────────────────────────
+# In-memory pending-verification store keyed by canonical E.164 phone:
+#   { phone: { "otp": str | None, "expires": float, "attempts": int, "provider": "verify" | "dev" } }
+# With Twilio Verify the code itself lives at the provider ("otp" is None); the
+# local entry only tracks expiry and the verification-attempt limit.
 _otp_store: dict = {}
 _otp_send_history: dict[str, list[float]] = {}
 OTP_EXPIRY_SECONDS = 600  # 10 minutes
@@ -13590,12 +13595,174 @@ OTP_SEND_COOLDOWN_SECONDS = int(os.environ.get("PLMKR_OTP_SEND_COOLDOWN_SECONDS"
 OTP_SEND_WINDOW_SECONDS = int(os.environ.get("PLMKR_OTP_SEND_WINDOW_SECONDS", "3600"))
 OTP_MAX_SENDS_PER_WINDOW = int(os.environ.get("PLMKR_OTP_MAX_SENDS_PER_WINDOW", "5"))
 OTP_MAX_VERIFY_ATTEMPTS = int(os.environ.get("PLMKR_OTP_MAX_VERIFY_ATTEMPTS", "5"))
+TWILIO_HTTP_TIMEOUT_SECONDS = float(os.environ.get("PLMKR_TWILIO_HTTP_TIMEOUT_SECONDS", "10"))
+
+# Safe error categories returned to the client. Provider internals never leave the server.
+OTP_ERR_INVALID_PHONE        = "invalid_phone"
+OTP_ERR_SEND_COOLDOWN        = "send_cooldown"
+OTP_ERR_SEND_LIMIT           = "send_limit"
+OTP_ERR_INVALID_CODE         = "invalid_code"
+OTP_ERR_EXPIRED_CODE         = "expired_code"
+OTP_ERR_TOO_MANY_ATTEMPTS    = "too_many_attempts"
+OTP_ERR_PROVIDER_UNAVAILABLE = "provider_unavailable"
+OTP_ERR_NOT_CONFIGURED       = "auth_not_configured"
+OTP_ERR_GENERIC              = "auth_failed"
+
+_OTP_ERR_MESSAGES = {
+    OTP_ERR_INVALID_PHONE:        "Enter a valid mobile number, including the country code if you are outside Canada or the US.",
+    OTP_ERR_SEND_COOLDOWN:        "Please wait before requesting another verification code.",
+    OTP_ERR_SEND_LIMIT:           "Too many verification codes requested. Please try again later.",
+    OTP_ERR_INVALID_CODE:         "That code is invalid or has expired. Try again or request a new code.",
+    OTP_ERR_EXPIRED_CODE:         "Code expired. Please request a new one.",
+    OTP_ERR_TOO_MANY_ATTEMPTS:    "Too many incorrect attempts. Please request a new code.",
+    OTP_ERR_PROVIDER_UNAVAILABLE: "The verification service is temporarily unavailable. Please try again shortly.",
+    OTP_ERR_NOT_CONFIGURED:       "Phone verification is not configured on this server.",
+    OTP_ERR_GENERIC:              "Verification could not be completed. Please try again.",
+}
+
+_PHONE_INPUT_ALLOWED = re.compile(r"^\+?[0-9()\-.\s]+$")
+_TWILIO_ACCOUNT_SID_RE = re.compile(r"^AC[0-9a-fA-F]{32}$")
+_TWILIO_AUTH_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+_TWILIO_VERIFY_SID_RE = re.compile(r"^VA[0-9a-fA-F]{32}$")
+
+
+class PhoneNormalizationError(ValueError):
+    """Raised when user phone input cannot be reduced to a canonical E.164 number."""
 
 
 def _normalize_phone(raw: str) -> str:
-    """Strip everything except digits, then prepend +."""
-    digits = re.sub(r'\D', '', raw.strip())
-    return '+' + digits
+    """Return the canonical E.164 form of user-entered phone input.
+
+    Accepts: a valid E.164 number beginning with "+"; a 10-digit NANP number
+    (→ "+1" + digits); an 11-digit NANP number beginning with "1" (→ "+" + digits).
+    Ordinary formatting (spaces, parentheses, hyphens, dots) is removed first.
+    Raises PhoneNormalizationError for letters, malformed input, impossible lengths,
+    or unsupported structures. This single path is used for send, verify, and all
+    cooldown / rate-limit keys.
+    """
+    text = (raw or "").strip()
+    if not text or not _PHONE_INPUT_ALLOWED.match(text):
+        raise PhoneNormalizationError("unsupported characters")
+    digits = re.sub(r"\D", "", text)
+    if text.startswith("+"):
+        # E.164: 1–3 digit country code (never starting with 0), 15 digits max.
+        if 8 <= len(digits) <= 15 and digits[0] != "0":
+            return "+" + digits
+        raise PhoneNormalizationError("invalid E.164 number")
+    if len(digits) == 11 and digits[0] == "1":
+        digits = digits[1:]
+    if len(digits) == 10 and digits[0] in "23456789" and digits[3] in "23456789":
+        return "+1" + digits
+    raise PhoneNormalizationError("unsupported number structure")
+
+
+def _phone_tag(phone: str) -> str:
+    """Masked identifier for logs — never the full number."""
+    return f"...{phone[-4:]}" if phone else "(none)"
+
+
+def _otp_error(code: str, status_code: int, retry_after: int | None = None) -> HTTPException:
+    """Build a sanitized HTTPException in the structured {code, message} contract."""
+    detail = {"code": code, "message": _OTP_ERR_MESSAGES.get(code, _OTP_ERR_MESSAGES[OTP_ERR_GENERIC])}
+    headers = None
+    if retry_after is not None:
+        detail["retry_after"] = int(retry_after)
+        headers = {"Retry-After": str(int(retry_after))}
+    return HTTPException(status_code=status_code, detail=detail, headers=headers)
+
+
+def _otp_rejection(code: str) -> dict:
+    """Sanitized 200-level rejection body for verify-otp (never authenticates)."""
+    return {"valid": False, "error_code": code, "reason": _OTP_ERR_MESSAGES[code]}
+
+
+def _canonical_phone_or_400(raw: str) -> str:
+    try:
+        return _normalize_phone(raw)
+    except PhoneNormalizationError:
+        raise _otp_error(OTP_ERR_INVALID_PHONE, 400)
+
+
+def _twilio_verify_service_sid() -> str:
+    """Canonical TWILIO_VERIFY_SERVICE_SID, with TWILIO_VERIFY_SID as a compatibility alias."""
+    return (os.environ.get("TWILIO_VERIFY_SERVICE_SID") or os.environ.get("TWILIO_VERIFY_SID") or "").strip()
+
+
+def _twilio_verify_config() -> tuple[str, str, str]:
+    """Return (account_sid, auth_token, verify_service_sid) or raise a sanitized 503.
+
+    Fails closed: a missing or malformed value never falls back to any other
+    delivery or acceptance path. Only the env var *name* is logged.
+    """
+    account_sid = (os.environ.get("TWILIO_ACCOUNT_SID") or "").strip()
+    auth_token = (os.environ.get("TWILIO_AUTH_TOKEN") or "").strip()
+    verify_sid = _twilio_verify_service_sid()
+    missing = []
+    if not _TWILIO_ACCOUNT_SID_RE.match(account_sid):
+        missing.append("TWILIO_ACCOUNT_SID")
+    if not _TWILIO_AUTH_TOKEN_RE.match(auth_token.lower()):
+        missing.append("TWILIO_AUTH_TOKEN")
+    if not _TWILIO_VERIFY_SID_RE.match(verify_sid):
+        missing.append("TWILIO_VERIFY_SERVICE_SID")
+    if missing:
+        log.error("otp_config_invalid", extra={"event": "otp_config_invalid", "keys": ",".join(missing)})
+        raise _otp_error(OTP_ERR_NOT_CONFIGURED, 503)
+    return account_sid, auth_token, verify_sid
+
+
+def _build_twilio_client(account_sid: str, auth_token: str):
+    """Construct the Twilio REST client. Patched in tests — never called with real credentials there."""
+    from twilio.http.http_client import TwilioHttpClient
+    from twilio.rest import Client as TwilioClient
+    return TwilioClient(account_sid, auth_token, http_client=TwilioHttpClient(timeout=TWILIO_HTTP_TIMEOUT_SECONDS))
+
+
+def _twilio_verify_service():
+    """Return the configured Twilio Verify service resource (fail-closed on config)."""
+    account_sid, auth_token, verify_sid = _twilio_verify_config()
+    return _build_twilio_client(account_sid, auth_token).verify.v2.services(verify_sid)
+
+
+def _twilio_error_meta(exc: Exception) -> tuple[int | None, int | None]:
+    """Non-sensitive (http_status, twilio_error_code) from a provider exception, if present."""
+    status = getattr(exc, "status", None)
+    code = getattr(exc, "code", None)
+    return (status if isinstance(status, int) else None, code if isinstance(code, int) else None)
+
+
+def _classify_twilio_send_error(exc: Exception) -> tuple[str, int]:
+    """Map a provider send failure to (safe_category, http_status). Never inspects message text."""
+    status, code = _twilio_error_meta(exc)
+    if code in (60200, 60205, 60220, 21211, 21614):   # invalid parameter / landline / unsupported destination
+        return OTP_ERR_INVALID_PHONE, 400
+    if code in (60203,) or status == 429:               # max send attempts reached
+        return OTP_ERR_SEND_LIMIT, 429
+    if code in (20003, 20404) or status in (401, 403, 404):  # bad credentials / unknown service
+        return OTP_ERR_NOT_CONFIGURED, 503
+    return OTP_ERR_PROVIDER_UNAVAILABLE, 503
+
+
+def _classify_twilio_check_error(exc: Exception) -> str:
+    """Map a provider check failure to a safe category. Never inspects message text."""
+    status, code = _twilio_error_meta(exc)
+    if code == 20404 or status == 404:                 # no pending verification (expired or consumed)
+        return OTP_ERR_EXPIRED_CODE
+    if code == 60202 or status == 429:                 # max check attempts reached
+        return OTP_ERR_TOO_MANY_ATTEMPTS
+    if code in (60200, 60022):                         # invalid code parameter
+        return OTP_ERR_INVALID_CODE
+    if code == 20003 or status in (401, 403):
+        return OTP_ERR_NOT_CONFIGURED
+    return OTP_ERR_PROVIDER_UNAVAILABLE
+
+
+def _log_otp_provider_failure(stage: str, phone: str, exc: Exception, category: str) -> None:
+    status, code = _twilio_error_meta(exc)
+    log.warning("otp_provider_failure", extra={
+        "event": "otp_provider_failure", "stage": stage, "phone": _phone_tag(phone),
+        "category": category, "provider_status": status, "provider_code": code,
+        "exc_type": type(exc).__name__,
+    })
 
 
 def _clean_otp_store():
@@ -13612,24 +13779,22 @@ def _clean_otp_store():
             del _otp_send_history[phone]
 
 
-def _record_otp_send(phone: str) -> None:
+def _check_otp_send_allowed(phone: str) -> None:
+    """Enforce resend cooldown and rolling send window for the canonical phone (no side effects)."""
     now = time.time()
-    sent_times = _otp_send_history.setdefault(phone, [])
+    sent_times = _otp_send_history.get(phone, [])
     if sent_times and now - sent_times[-1] < OTP_SEND_COOLDOWN_SECONDS:
         retry_after = max(1, int(OTP_SEND_COOLDOWN_SECONDS - (now - sent_times[-1])))
-        raise HTTPException(
-            status_code=429,
-            detail="Please wait before requesting another verification code.",
-            headers={"Retry-After": str(retry_after)},
-        )
+        raise _otp_error(OTP_ERR_SEND_COOLDOWN, 429, retry_after=retry_after)
     if len(sent_times) >= OTP_MAX_SENDS_PER_WINDOW:
         retry_after = max(1, int(sent_times[0] + OTP_SEND_WINDOW_SECONDS - now))
-        raise HTTPException(
-            status_code=429,
-            detail="Too many verification codes requested. Please try again later.",
-            headers={"Retry-After": str(retry_after)},
-        )
-    sent_times.append(now)
+        raise _otp_error(OTP_ERR_SEND_LIMIT, 429, retry_after=retry_after)
+
+
+def _record_otp_send(phone: str) -> None:
+    """Check limits and record a send for the canonical phone."""
+    _check_otp_send_allowed(phone)
+    _otp_send_history.setdefault(phone, []).append(time.time())
 
 
 class SendOtpRequest(BaseModel):
@@ -13643,101 +13808,116 @@ class VerifyOtpRequest(BaseModel):
 
 @app.post("/api/auth/send-otp")
 async def send_otp(payload: SendOtpRequest):
-    """Send a 6-digit OTP via Twilio SMS. Requires TWILIO_* env vars."""
-    try:
-        _clean_otp_store()
+    """Start a Twilio Verify SMS verification for the canonical phone number."""
+    _clean_otp_store()
+    phone = _canonical_phone_or_400(payload.phone)
 
-        phone = _normalize_phone(payload.phone)
-        if len(phone) < 8:
-            raise HTTPException(status_code=400, detail="Invalid phone number")
+    # R-17 dev bypass (local only — boot exits if RAILWAY_ENVIRONMENT or a Verify SID is set).
+    if SMS_OTP_DEV_BYPASS:
         _record_otp_send(phone)
-
-        # R-17 dev bypass: skip Twilio and store a fixed dev code
-        if SMS_OTP_DEV_BYPASS:
-            dev_otp = "000000"
-            _otp_store[phone] = {
-                "otp": dev_otp,
-                "expires": time.time() + OTP_EXPIRY_SECONDS,
-                "attempts": 0,
-            }
-            log.warning("boot_warning", extra={
-                "event":  "boot_warning",
-                "key":    "SMS_OTP_DEV_BYPASS",
-                "detail": f"dev OTP 000000 stored for ...{phone[-4:]} without SMS send",
-            })
-            return {"status": "ok", "message": "Dev bypass — code is 000000"}
-
-        account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
-        auth_token  = os.environ.get("TWILIO_AUTH_TOKEN")
-        from_number = os.environ.get("TWILIO_PHONE_NUMBER")
-
-        if not all([account_sid, auth_token, from_number]):
-            raise HTTPException(status_code=503, detail="SMS service not configured — set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER")
-
-        # Strip whitespace — Railway env vars can have trailing newlines/spaces
-        auth_token  = (auth_token  or "").strip()
-        account_sid = (account_sid or "").strip()
-        from_number = (from_number or "").strip()
-
-        # Validate auth token format BEFORE storing OTP (R-17 fix: was after)
-        if not (auth_token and len(auth_token) == 32 and re.fullmatch(r"[0-9a-f]+", auth_token.lower())):
-            raise HTTPException(
-                status_code=503,
-                detail=f"SMS not configured — TWILIO_AUTH_TOKEN must be exactly 32 lowercase hex characters (got {len(auth_token)} chars). Set the correct token in Railway env vars."
-            )
-
-        otp = str(secrets.randbelow(1000000)).zfill(6)
         _otp_store[phone] = {
-            "otp": otp,
+            "otp": "000000",
             "expires": time.time() + OTP_EXPIRY_SECONDS,
             "attempts": 0,
+            "provider": "dev",
         }
+        log.warning("boot_warning", extra={
+            "event":  "boot_warning",
+            "key":    "SMS_OTP_DEV_BYPASS",
+            "detail": f"dev OTP 000000 stored for {_phone_tag(phone)} without SMS send",
+        })
+        return {"status": "ok", "message": "Dev bypass — code is 000000"}
 
-        from twilio.rest import Client as TwilioClient
-        twilio = TwilioClient(account_sid, auth_token)
-        twilio.messages.create(
-            body=f"Your PLMKR code is {otp}. Valid for 10 minutes.",
-            from_=from_number,
-            to=phone,
-        )
+    # Validate configuration and limits BEFORE any provider call or state change.
+    service = _twilio_verify_service()
+    _check_otp_send_allowed(phone)
 
-        print(f"[OTP] Sent to ...{phone[-4:]}")
-        return {"status": "ok", "message": "Code sent"}
+    try:
+        verification = service.verifications.create(to=phone, channel="sms")
+    except Exception as exc:  # provider SDK exceptions are never surfaced
+        category, status_code = _classify_twilio_send_error(exc)
+        _log_otp_provider_failure("send", phone, exc, category)
+        raise _otp_error(category, status_code)
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"[OTP] Send error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    provider_status = str(getattr(verification, "status", "") or "")
+    if provider_status not in ("pending", "approved"):
+        log.warning("otp_send_unexpected_status", extra={
+            "event": "otp_send_unexpected_status", "phone": _phone_tag(phone), "provider_status": provider_status,
+        })
+        raise _otp_error(OTP_ERR_PROVIDER_UNAVAILABLE, 503)
+
+    _record_otp_send(phone)
+    _otp_store[phone] = {
+        "otp": None,
+        "expires": time.time() + OTP_EXPIRY_SECONDS,
+        "attempts": 0,
+        "provider": "verify",
+    }
+    log.info("otp_sent", extra={"event": "otp_sent", "phone": _phone_tag(phone), "channel": "sms"})
+    return {"status": "ok", "message": "Code sent"}
+
+
+def _otp_code_is_well_formed(code: str) -> bool:
+    return bool(re.fullmatch(r"[0-9]{4,10}", code))
+
+
+def _count_failed_attempt(phone: str, entry: dict, category: str) -> dict:
+    """Record a failed attempt; invalidate the pending verification once the limit is hit."""
+    entry["attempts"] = int(entry.get("attempts", 0)) + 1
+    if entry["attempts"] >= OTP_MAX_VERIFY_ATTEMPTS:
+        _otp_store.pop(phone, None)
+        return _otp_rejection(OTP_ERR_TOO_MANY_ATTEMPTS)
+    return _otp_rejection(category)
 
 
 @app.post("/api/auth/verify-otp")
 async def verify_otp(payload: VerifyOtpRequest):
-    """Verify OTP and issue the canonical signed artist session."""
-    phone = _normalize_phone(payload.phone)
+    """Check the submitted code with Twilio Verify and issue the canonical signed artist session."""
+    phone = _canonical_phone_or_400(payload.phone)
+    submitted_code = (payload.code or "").strip()
     entry = _otp_store.get(phone)
 
     if not entry:
         return {
             "valid": False,
+            "error_code": OTP_ERR_EXPIRED_CODE,
             "reason": "No code found for this number. Please request a new code.",
         }
 
     if time.time() > entry["expires"]:
-        del _otp_store[phone]
-        return {"valid": False, "reason": "Code expired. Please request a new one."}
+        _otp_store.pop(phone, None)
+        return _otp_rejection(OTP_ERR_EXPIRED_CODE)
 
-    if entry["otp"] != payload.code.strip():
-        entry["attempts"] = int(entry.get("attempts", 0)) + 1
-        if entry["attempts"] >= OTP_MAX_VERIFY_ATTEMPTS:
-            del _otp_store[phone]
-            return {
-                "valid": False,
-                "reason": "Too many incorrect attempts. Please request a new code.",
-            }
-        return {"valid": False, "reason": "Incorrect code. Try again."}
+    if not _otp_code_is_well_formed(submitted_code):
+        return _count_failed_attempt(phone, entry, OTP_ERR_INVALID_CODE)
 
-    del _otp_store[phone]
+    if entry.get("provider") == "dev" and SMS_OTP_DEV_BYPASS:
+        local_code = str(entry.get("otp") or "")
+        if not (local_code and secrets.compare_digest(local_code, submitted_code)):
+            return _count_failed_attempt(phone, entry, OTP_ERR_INVALID_CODE)
+    else:
+        if entry.get("provider") != "verify":
+            # A locally generated code is never accepted once real Verify auth is in play.
+            _otp_store.pop(phone, None)
+            return _otp_rejection(OTP_ERR_EXPIRED_CODE)
+        service = _twilio_verify_service()
+        try:
+            check = service.verification_checks.create(to=phone, code=submitted_code)
+        except Exception as exc:  # provider SDK exceptions are never surfaced
+            category = _classify_twilio_check_error(exc)
+            _log_otp_provider_failure("check", phone, exc, category)
+            if category in (OTP_ERR_EXPIRED_CODE, OTP_ERR_TOO_MANY_ATTEMPTS):
+                _otp_store.pop(phone, None)
+                return _otp_rejection(category)
+            if category == OTP_ERR_INVALID_CODE:
+                return _count_failed_attempt(phone, entry, OTP_ERR_INVALID_CODE)
+            raise _otp_error(category, 503)
+        if str(getattr(check, "status", "") or "") != "approved":
+            return _count_failed_attempt(phone, entry, OTP_ERR_INVALID_CODE)
+
+    # Explicitly approved (or dev-bypass match): consume the pending verification.
+    _otp_store.pop(phone, None)
+    log.info("otp_verified", extra={"event": "otp_verified", "phone": _phone_tag(phone)})
 
     # Preserve old local behavior until the two identity secrets are configured.
     if not identity_configured():
@@ -13979,6 +14159,15 @@ if _on_railway and SMS_OTP_DEV_BYPASS:
     print(f"  RAILWAY_ENVIRONMENT={_RAILWAY_ENVIRONMENT!r}")
     print("  This bypasses SMS verification in production.")
     print("  Unset SMS_OTP_DEV_BYPASS before deploying.")
+    print("=" * 60)
+    import sys
+    sys.exit(1)
+if SMS_OTP_DEV_BYPASS and _twilio_verify_service_sid():
+    # Fail closed: a local dev code must never coexist with a real Verify service.
+    print("=" * 60)
+    print("FATAL: SMS_OTP_DEV_BYPASS=true while TWILIO_VERIFY_SERVICE_SID is configured.")
+    print("  The dev bypass must never shadow real Twilio Verify authentication.")
+    print("  Unset SMS_OTP_DEV_BYPASS or the Verify service SID.")
     print("=" * 60)
     import sys
     sys.exit(1)
