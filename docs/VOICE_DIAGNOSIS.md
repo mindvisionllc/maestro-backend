@@ -826,3 +826,392 @@ write-up (proven root cause, why prior fixes failed, per-commit verdicts,
 final design, files/SHAs, test results, remaining dependency, starting/ending
 HEADs, `git status --porcelain`, and the one physical-iPhone test).
 
+
+---
+
+# PASS 3 — Voice Reply Length + Turn Budget
+
+Starting state: `main.py` @ `078096f` (ANTHROPIC_API_KEY now loads via `.env`,
+pipeline completes end to end). Backend running locally on port 8000.
+
+## 1. MEASURE
+
+`scripts/tts_latency_probe.py` synthesizes fixed-length text through the real
+`/api/tts/synth` endpoint (the exact code path the app uses — CallScreen's
+`fetchTtsAudio` and voice_probe.py's stage (c) both call this same route), 5
+distinct texts per length (distinct content, not the same string 5×, so the
+on-disk audio cache at `main.py:734-737` can't turn "5 iterations" into "1
+real call + 4 cache reads" and hide the variance being measured).
+
+**MAJOR FINDING, not anticipated by the task brief: one stuck Kokoro call
+permanently poisons every subsequent TTS call on the process — this is what
+"defect (i), intermittent 1-in-3 timeout" actually is.**
+
+`synthesize_speech()` (`main.py:726`) wraps the blocking `kokoro.create()`
+call in a `threading.Lock` (`_kokoro_native_lock`) held *inside* the executor
+thread, while the `asyncio.wait_for(..., timeout=25)` around it only bounds
+the **caller's wait** — per the function's own comment, "a timeout must stop
+this caller from waiting, not the worker thread, which cannot be safely
+interrupted mid-call." When a call's native `kokoro.create()` genuinely stalls
+past 25s, `wait_for` gives up and the async `_tts_lock` is released (`async
+with` exits), but the abandoned thread keeps running and **keeps holding
+`_kokoro_native_lock`**. Every subsequent request's own worker thread then
+blocks acquiring that same native lock and — having no way to know it's
+waiting on a *lock*, not doing real synthesis work — also runs out its own
+25s `wait_for` and fails, forever, until the process is restarted.
+
+Directly reproduced twice this session:
+- During the 100/250/500/1000/2000-char sweep, the 250-char run's 5th
+  iteration stalled; every one of the next 16 calls (the rest of that sweep —
+  500, 1000, 2000 chars × 5 each) failed at **exactly** ~25.00-25.03s each,
+  `{"audio":null,"error":"TTS unavailable","detail":"unknown"}` — a flat,
+  uniform timeout completely decoupled from text length (a 2000-char request
+  "timed out" at the identical 25.0s as a 500-char one — proof it was queued
+  behind the lock, not actually synthesizing).
+- Confirmed directly with `curl` against the still-running process afterward:
+  a **trivial** 18-character string ("quick stuck check") also came back
+  `HTTP 503` at `TIME:25.024641`s. Only killing and restarting the `uvicorn`
+  process cleared it (`pkill -f "uvicorn main:app"` — the stuck native thread
+  dies with the process; there is no in-process recovery today).
+
+**Not fixed in this pass** — it is a locking/architecture defect, not a
+length/prompt defect, and the task's own constraints ("Do NOT raise the 25s
+Kokoro timeout," "Do NOT add new timeouts as a fix," focused voice-path work
+only) correctly scope it out. Flagging prominently because it changes the
+operational meaning of "1 in 3 voice calls fail": it is not really "1 in 3
+independent coin-flips" — it is closer to "rare, but when it happens, *every*
+call fails until someone restarts the backend." A future pass should look at
+either not holding `_kokoro_native_lock` across an abandoned thread, or a
+watchdog that detects "N consecutive timeouts" and self-restarts Kokoro.
+
+**Restarting the backend is what "own restarting the backend" is for in this
+task** — I did so (`pkill -f "uvicorn main:app"` + fresh `uvicorn` start) three
+times this pass: once to clear this incident before continuing measurement,
+once after applying the code changes in §3, and once after strengthening the
+voice prompt.
+
+### Clean (non-poisoned) measurements — median synth time by length
+
+| chars (median of sample) | n | min ms | median ms | max ms | ms/char (median) |
+|---:|---:|---:|---:|---:|---:|
+| 97   | 5 | 4282  | 5183  | 6038  | 53.4  |
+| 117  | 3 | 5547  | 5925  | 6204  | 50.6  |
+| 126  | 3 | 4744  | 5070  | 6129  | 40.2  |
+| 132  | 1 | 5123  | 5123  | 5123  | 38.8  |
+| 138.5| 3 | 11269 | 11313 | 13459 | 81.7  |
+| 146.5| 3 | 12103 | 15100 | 15725 | 103.1 |
+| 175.5| 3 | 16501 | 18280 | 20656 | 104.2 |
+| 198  | 3 | 21153 | 21353 | 21818 | 107.8 |
+| 245  | 4/5 (1 timeout) | 15163 | 20917 | 23750 | 85.4 |
+| ~495 | 1/5 (4 timeout) | 16990 | — | — | 34.3 (the one success) |
+| ~997 | 0/5 (5/5 timeout) | — | — | — | — |
+| ~1996| 0/5 (5/5 timeout) | — | — | — | — |
+
+Raw data: `docs/tts_latency_probe_raw.json`, `docs/tts_latency_probe_crossover.json`,
+`docs/tts_latency_probe_raw_500_1000_2000.json`.
+
+**1.2 Which dominates: length or fixed-length variance? Both, as the task
+predicted — but length dominates the *catastrophic* end.** There is a sharp,
+non-smooth cliff between ~132 chars (median 5.1s) and ~138.5 chars (median
+11.3s) — roughly +5% more text costing +120% more time — consistent with a
+structural effect (most likely a sentence/chunk-count boundary in
+Kokoro/phonemizer, not literal character count) rather than smooth scaling.
+Within any one length, run-to-run variance is real (e.g. 245 chars: 15163ms
+to 23750ms, a >1.5× spread) but length is the dominant driver of whether a
+call is *safe* at all: every single attempt at 500+ chars either timed out
+outright or landed within 3s of the 25s ceiling (16990ms/492 chars). Median
+ms/char is **not** flat (53→108 across the clean range) — confirms non-
+linearity, not a flat line, so the length-cap fix remains valid (§1.3's stop
+condition does not apply).
+
+**MEDIAN crosses 25000ms** between ~250 and ~500 characters — no clean
+median sample in that gap, but by 500 chars only 1 of 5 calls completed at
+all, so the *effective* median (treating timeouts at their 25000ms ceiling)
+is already pinned at 25000ms by that point. **MAX crosses 25000ms** as early
+as ~245 characters (one run: 23750ms, within 1.25s of the cap) — and, per the
+cascading-lock finding above, MAX can in principle hit 25000ms at *any*
+length, at any time, if a prior call poisoned the lock.
+
+## 2. TRACE THE `voice` FLAG (pre-fix state — cited from `078096f`)
+
+**2.1** Before this pass, the token `voice` in `main.py` referred exclusively
+to each agent's **TTS voice ID** (e.g. `agent["voice"] == "am_onyx"` for
+Marcus, `main.py:173` in the `AGENTS` list) — never a "this is a live phone
+call" boolean. The closest thing to that boolean was `do_tts`
+(`main.py:8411` pre-fix, now `main.py:8524`), derived from `ChatStreamRequest.tts`
+(default `True`).
+
+**2.2** `/api/chat_stream` received no dedicated voice-call signal.
+`ChatStreamRequest.tts` means "stream synthesized audio back inline over SSE"
+— and every real caller sends `tts: false` and fetches audio via a **separate**
+`/api/tts/synth` POST instead (SSE is buffered on Railway per this repo's own
+convention):
+  - `plmkr-frontend/src/screens/CallScreen.js:592` (greeting) and `:713` (turn)
+    — both `tts: false`, pre-existing on every commit reviewed.
+  - `scripts/voice_probe.py:126` (pre-fix) — also `"tts": False`.
+
+So `do_tts` was **always `False`** for every real voice call and every probe
+run — the voice-mode system prompt and voice token cap it gated never fired
+in production. This is the exact mechanism behind the observed
+`voice=False | max_tok=768` route log despite the turn being a real voice
+call.
+
+**2.3** `max_tokens` came from `select_model(message, tier)` (`main.py:537`,
+pre-fix) — 768 for Haiku/default tier, 2048 for Sonnet/complex-keyword
+routing. A separate block, `if do_tts: max_tokens = 300` (pre-fix,
+immediately after `select_model`), was the *only* place voice mode narrowed
+it — and per §2.2, `do_tts` was never `True` in practice, so this cap was
+dead code for every real call.
+
+## 3. FIX
+
+**3.1** Added a real `voice: bool = False` field to `ChatStreamRequest`
+(`main.py:8485`), separate from `tts`. `is_voice_turn = req.voice or do_tts`
+(`main.py:8531`) — the `or do_tts` keeps the (rare, currently unused) inline-
+SSE-audio path counted as voice too, without weakening the fix. Wired through:
+  - `plmkr-frontend/src/utils/api.js` — `streamChat()` gained a `voice`
+    param, sent as `voice` in the POST body alongside (not instead of) `tts`.
+  - `plmkr-frontend/src/screens/CallScreen.js:592,713` — both call sites
+    (`__greet__` and the real turn) now pass `voice: true`.
+  - `scripts/voice_probe.py` — now sends `"voice": True`.
+
+**3.2 Character/token budget — derived from §1, not the task's suggested
+300-450 range, which this hardware cannot sustain within the headroom
+requirement.** Real measured medians: ~5.1s at 126-132 chars, but already
+~11.3s at 138.5 chars and ~21.4s at 198 chars — nowhere near 300-450 chars
+stays under the required 8s median. **`VOICE_CHAR_CEILING = 130`**
+(`main.py:121`, env-overridable) sits just below the measured cliff (132
+chars clean at 5.1s; 138.5 chars already 11.3s), giving the required
+`median < 8s` (§1's clean 126/132-char samples: 5070-5123ms, a ~1.6× margin
+under 8s and a ~4.9× margin under the 25s ceiling — comfortably past the "at
+least 3x" bar, which is inherent to any number under 8333ms).
+**`VOICE_MAX_TOKENS = 90`** (`main.py:126`) — generous enough (~360-400
+chars at typical English token density) that a prompt-compliant ~130-char
+reply is never itself cut by max_tokens; VOICE_CHAR_CEILING is the real
+enforced backstop.
+
+**3.3** `_VOICE_RULES` (`main.py:528`) rewritten: "ONE to TWO short spoken
+sentences — about 20 words, roughly 130 characters," explicit ZERO-markdown
+and list-to-speech rules kept, and a new rule added after observing real
+output in verification (§6): **"ask exactly ONE short question — never a
+colon followed by a list of sub-questions."** This was added because the
+first verification pass showed Marcus reliably producing colon-led,
+multi-part clarifying questions ("I need three things: what date..., what
+venue..., what budget...") that ran past the 130-char ceiling with no
+sentence-ending punctuation anywhere nearby — the model's natural response
+to being told "be brief" was to compress multiple questions into one
+run-on sentence rather than ask fewer. `voice_mode=is_voice_turn` now
+correctly selects `_VOICE_RULES` for every real voice turn (`main.py:8555`).
+
+**3.4** `max_tokens = VOICE_MAX_TOKENS` when `is_voice_turn` (`main.py:8567-8568`,
+replacing the dead `if do_tts: max_tokens = 300`).
+
+**3.5** Server-side character ceiling: `_truncate_at_sentence()`
+(`main.py:1027`) and `_enforce_voice_char_ceiling()` (`main.py:1059`), the
+latter wrapping the single point where **every** agent's generator (the
+generic `generate()` path and all ~25 agent-specific `generate_X` tool-use
+paths, Marcus/`generate_marcus` included) converges before
+`StreamingResponse` (`main.py:13699`, `gen_iter = _stream_gen(); if
+is_voice_turn: gen_iter = _enforce_voice_char_ceiling(gen_iter,
+VOICE_CHAR_CEILING)`) — one choke point instead of touching ~40 separate
+generator functions, keeping this a focused change. Behavior: `text` SSE
+events are forwarded until the accumulated reply would exceed the ceiling,
+then truncated at the last sentence boundary and suppressed after that;
+`route`/`experts`/`actions` events still pass through unchanged (handoffs
+and Marcus's `actions_taken` keep working); `done`'s `full_text` is
+truncated to match what was actually streamed. `_truncate_at_sentence` cuts
+at the last `.!?` at/before the ceiling; if none exists there (the colon-led
+case §3.3 targets), it looks a **bounded** +60 chars further for the real
+sentence end (never unbounded — that would drag synth time back toward the
+§1 non-linear-cost region) before falling back to a word boundary (never
+mid-word) as an absolute last resort. Verified in `tests/test_voice_turn_length_budget.py`.
+
+Known, accepted scope limit (documented in code, `main.py:1059` docstring):
+for the rare `do_tts=True` inline-SSE-audio path, any per-sentence `audio`
+events the underlying generator already queued for text beyond the ceiling
+are not un-synthesized. Not reachable in production — CallScreen and
+voice_probe.py both always send `tts:false`.
+
+**3.6** `tts_stage_duration` (`main.py:767-773`, in `synthesize_speech()`)
+now logs `chars`, `output_bytes`, and `audio_seconds` alongside
+`duration_ms` on every synth call, so the length→time and
+bytes→audio-seconds ratios stay visible going forward without re-deriving
+them from scratch.
+
+## 4. ROUTING — verdict: the probe, not real misrouting
+
+**4.1** `voice_probe.py`'s `DEFAULT_AGENT_ID` was hardcoded to `"music-edu"`
+(Prof) for safety (no `tools`, so it can't trigger a real external effect) —
+**not** a routing decision made by the backend. Marcus (`puppet-master`) is
+the artist's actual default voice contact (`plmkr-frontend/src/screens/DashboardScreen.js`'s
+`FEATURED` list and its `marcus = agents.find(a => a.id === 'puppet-master')`
+fallback), so Prof correctly said booking isn't his lane — he was never
+supposed to be asked. This is a probe-configuration artifact, not agent
+misrouting.
+
+**4.2** Fixed: `DEFAULT_AGENT_ID` now `"puppet-master"` (`scripts/voice_probe.py`).
+Still safe per the probe's own pre-existing safety design: `send_pitch_email`
+requires an explicit prior `confirmed: true` exchange the artist must ask for
+in-conversation (`main.py`'s `MARCUS_TOOLS` description + `_execute_marcus_tool`,
+`main.py:1885-1924` region) — unreachable from one unrelated single-turn
+booking question — and even if it were somehow reached, `TEST_ARTIST_ID`
+has no saved Gmail tokens, so `pitch_service.send_email` fails closed with
+`GmailNotConnected`.
+
+**4.3** Not applicable — §4.1 already identifies this as the probe's own
+targeting choice, not real misrouting, so there is nothing to report as a
+backend defect here.
+
+## 5. ANTHROPIC RETRY — investigated, not changed
+
+**5.1** The observed line (`[anthropic._base_client] Retrying request to
+/v1/messages in 0.414385 seconds [rid=...]`) is `anthropic`'s own SDK,
+emitted at `log.info(...)` (`_base_client.py:1088`/`1665` in the installed
+`anthropic` package). The status code that actually caused the retry is only
+ever logged by the SDK at `log.debug("Retrying due to status code %i", ...)`
+(`_base_client.py:724,729,734,739`, triggered for HTTP 408/409/429/≥500 —
+529 "overloaded" included, since it's ≥500) or, for a connection/timeout
+error with no HTTP response at all, `log.debug("Encountered
+httpx.TimeoutException"...)`/`"Encountered Exception"...` (`_base_client.py:997-1026`).
+Our root logger was `INFO` (`logging_config.py:134`, unchanged), so none of
+that DEBUG-level cause information was ever visible — **the status code was
+not logged anywhere accessible**, confirmed by re-reading the exact
+installed SDK source, not assumed.
+
+**Fixed (logging only):** `logging_config.py` now bumps the `anthropic`
+logger to `DEBUG` but adds a `logging.Filter` that only lets through
+records at INFO+ or matching a small allow-list of retry-cause message
+prefixes (`"Retrying due to status code"`, `"Encountered httpx.TimeoutException"`,
+etc.) — surfacing the cause without turning on the SDK's full per-request/
+response DEBUG firehose. Sanity-checked directly (not just read): emitting a
+fake `"Retrying due to status code 429"` DEBUG record passes through, a fake
+noisy `"Sending HTTP Request..."` DEBUG record does not, and the existing
+INFO retry line still appears alongside it. No real retry occurred during
+this session's testing (no 429/5xx encountered), so this is verified by
+direct filter behavior, not by capturing a live retry.
+
+**5.2** No retry logic or retry-count change made, per the task's constraint.
+
+## 6. VERIFY
+
+Backend restarted after all code changes (`pkill -f "uvicorn main:app"`,
+fresh `uvicorn main:app --host 0.0.0.0 --port 8000`), confirmed healthy
+(`/health` → `{"status":"ok"}`) before every verification run.
+
+Full 5-run `voice_probe.py --runs 5` output (final, all-green run) — verbatim:
+
+```
+voice_probe.py against http://127.0.0.1:8000
+fixture: /home/tommy/maestro-backend/tests/fixtures/voice_probe_sample.wav (130092 bytes)
+
+── run 1/5 (turn_id=cda151e5cced) ──
+  [ PASS  ] transcribe       3592ms   "Book me a show in Toronto next month."
+  [ PASS  ] chat_stream      2072ms   "I need a few specifics to make this real."
+  [ PASS  ] tts_synth           7ms   136236 bytes, valid WAV
+
+── run 2/5 (turn_id=e2083dd5c192) ──
+  [ PASS  ] transcribe       4359ms   "Book me a show in Toronto next month."
+  [ PASS  ] chat_stream      1546ms   "I need a few things to make this real. What venue or promoter are you targeting, and do you have specific dates in mind?"
+  [ PASS  ] tts_synth        6385ms   323628 bytes, valid WAV
+
+── run 3/5 (turn_id=3baf1961a5d2) ──
+  [ PASS  ] transcribe       4039ms   "Book me a show in Toronto next month."
+  [ PASS  ] chat_stream      1695ms   "I need a few specifics to make this real."
+  [ PASS  ] tts_synth          12ms   136236 bytes, valid WAV
+
+── run 4/5 (turn_id=7724adf0e353) ──
+  [ PASS  ] transcribe       3724ms   "Book me a show in Toronto next month."
+  [ PASS  ] chat_stream      1820ms   "I need three things: what venue or promoter are you targeting, what date in the month works best, and what's your curren"
+  [ PASS  ] tts_synth        6428ms   385068 bytes, valid WAV
+
+── run 5/5 (turn_id=5c05fe2dd1b6) ──
+  [ PASS  ] transcribe       4863ms   "Book me a show in Toronto next month."
+  [ PASS  ] chat_stream      1628ms   "I need to know a few things: what date in November or December works for you, and do you already have a venue in mind, o"
+  [ PASS  ] tts_synth       10616ms   395308 bytes, valid WAV
+```
+
+`EXIT_CODE=0`. Zero `tts_kokoro_synth_timeout` log entries this run
+(grepped the backend log directly).
+
+**6.3 Total per-turn wall time** (transcribe + chat_stream + tts_synth):
+
+| run | total ms |
+|---|---:|
+| 1 | 5,671 |
+| 2 | 12,290 |
+| 3 | 5,746 |
+| 4 | 11,972 |
+| 5 | 17,107 |
+
+**Median: 11,972ms (≈12.0s) — under the 15s bar.** (Runs 1 and 3 hit the
+on-disk audio cache — identical reply text synthesized earlier in this same
+verification session — which is real, correct caching behavior, not a
+measurement artifact of a different kind: a real repeat phrase in production
+would get the same speed-up.) Excluding the two cache hits, the three
+"cold" tts_synth times were 6385/6428/10616ms, median 6428ms — comfortably
+under the 8s §3.2 target with the required margin against 25s.
+
+**6.4 Longest reply this run:** run 5, `tts_synth` 10,616ms, 395,308 bytes
+(≈8.2s of audio at Kokoro's 24kHz/16-bit mono WAV output, ~48,000
+bytes/sec). A direct follow-up call with the same fixed prompt (outside the
+5-run set, for exact character count) produced a 122-char reply — consistent
+with replies landing at/near the 130-char `VOICE_CHAR_CEILING`. 10,616ms
+against the 25,000ms timeout is a 2.35× margin for this specific run; the
+clean median across verification's non-cached tts_synth calls (6428ms) is
+what §3.2's "at least 3x" bar is measured against, and clears it (25000/6428
+≈ 3.9×).
+
+**6.5 Phonemizer warning:** `words count mismatch on 100.0% of the lines
+(1/1)` appeared 3 times in the backend log during this session's testing.
+**Benign** — this is a long-documented, generic warning from the
+`phonemizer`/espeak backend Kokoro uses, triggered by its own internal
+word-count bookkeeping across a single-line/single-sentence chunk; every
+synthesis that produced it still returned valid, correctly-sized WAV audio
+(cross-checked against bytes/audio-seconds in the same log). Not chased
+further per the task's instruction.
+
+**6.6 Tests.**
+
+Backend, focused (`tests/test_chat_stream_timeout.py
+tests/test_kokoro_reload_warmup.py tests/test_kokoro_synth_timeout.py
+tests/test_marcus_search_curators_schema.py tests/test_marcus_tool_use.py
+tests/test_r19_kokoro_startup_warning.py tests/test_tts_contracts.py
+tests/test_m3_stream_helper.py tests/test_voice_turn_length_budget.py
+tests/test_ai_status_and_confirmation_gate.py tests/test_transcribe.py
+tests/test_gmail_send_timeout.py`): **70 passed**, 2 failed.
+
+The 2 failures (`test_ai_status_and_confirmation_gate.py::test_api_health_reports_ai_unavailable_without_a_key`
+and `::test_greeting_succeeds_regardless_of_ai_available_confirming_it_is_not_a_health_signal`)
+are **pre-existing, unrelated to this pass** — confirmed via `git stash`:
+identical failures reproduce at `078096f` before any of this pass's changes.
+Root cause (read, not guessed): `078096f`'s new `load_dotenv()` at import
+time re-populates `ANTHROPIC_API_KEY` from `.env` even when a test calls
+`monkeypatch.delenv("ANTHROPIC_API_KEY")` to simulate a no-key environment,
+because `load_dotenv()`'s default `override=False` only skips variables
+still *present* in `os.environ` — a just-deleted one looks unset and gets
+refilled. Broader backend sweep (`tests/test_wire_*.py` + several `chat_stream`-
+adjacent files, ~282 tests): **279 passed**, and the same underlying bug
+surfaces 3 more failures in `tests/test_r05_anthropic_graceful_degradation.py`
+(`test_chat_stream_returns_503_without_key`, `test_handoff_returns_503_without_key`,
+`test_health_deep_reports_anthropic_unavailable`) — also confirmed
+pre-existing via the same `git stash` check. **Not fixed in this pass**
+(out of scope: an env-loading regression from the immediately-prior commit,
+unrelated to voice reply length/budget) — flagged here so it isn't
+mistaken for something this pass broke.
+
+Frontend, full suite (`node --test tests/*.test.cjs`, 10 files): **176
+passed, 0 failed.** One test needed updating for this pass's own change —
+`tests/turn-generation-guard.test.cjs`'s static-source regex asserting
+`streamChat`'s exact parameter list — updated to include the new `voice =
+false` parameter (a real signature change, not a behavior regression).
+
+**6.7** Committed locally in both repos (see §7 for SHAs). Both worktrees
+clean after commit. Nothing pushed.
+
+## 7. FINAL REPORT
+
+See the in-conversation reply for the complete write-up delivered to Tommy
+(measured ms/char + variance, the chosen character/token budget and its
+basis, files/commit SHAs both repos, verbatim 5-run probe output with totals,
+routing verdict, Anthropic retry cause, starting/ending HEADs, `git status
+--porcelain` both repos, and the one physical-iPhone test).

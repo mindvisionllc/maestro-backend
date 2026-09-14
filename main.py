@@ -107,6 +107,24 @@ TRANSCRIBE_TIMEOUT_SECONDS = float(os.environ.get("TRANSCRIBE_TIMEOUT_SECONDS", 
 # anywhere near the ~60s+ hang seen when a synth call got stuck.
 KOKORO_SYNTH_TIMEOUT_SECONDS = float(os.environ.get("KOKORO_SYNTH_TIMEOUT_SECONDS", "25"))
 
+# Hard character ceiling on a voice turn's spoken reply, enforced server-side
+# before text reaches TTS (VOICE_DIAGNOSIS.md Pass 3 §3.5) — the backstop for
+# when the prompt (§3.3)/max_tokens cap (§3.4) don't hold. Derived from real
+# measurement (scripts/tts_latency_probe.py) on this dev machine's Kokoro
+# synth, NOT the task's own suggested 300-450 char range: median synth time is
+# non-linear in text length and already exceeds the 8s headroom requirement
+# well below that range (median ~5.1s at 126-132 chars; ~11.3-15.1s, already
+# over budget, at 138-147 chars; ~20.9s at ~244 chars; every call at 500+
+# chars either timed out at the 25s ceiling or came within ~3s of it). 130
+# keeps every observed voice reply's median comfortably under the 8s bar with
+# margin. See docs/VOICE_DIAGNOSIS.md Pass 3 §1 for the full data.
+VOICE_CHAR_CEILING = int(os.environ.get("VOICE_CHAR_CEILING", "130"))
+# Generous enough that a prompt-compliant ~130-char reply is never cut mid-
+# sentence by max_tokens itself (that job belongs to the sentence-aware
+# VOICE_CHAR_CEILING truncation above) — this just bounds worst-case
+# generation time/cost if the model ignores the brevity instruction.
+VOICE_MAX_TOKENS = int(os.environ.get("VOICE_MAX_TOKENS", "90"))
+
 # Bounds the Anthropic call(s) inside /api/chat_stream. Both must stay comfortably
 # under the frontend's 60s SSE inactivity watchdog (see streamChat's WATCHDOG_MS in
 # plmkr-frontend/src/utils/api.js) so the backend can emit a clean "error" SSE event
@@ -498,13 +516,22 @@ Neo — AI Tools | Maya — Wellness | Doc — Royalty Recovery | Cal — Schedu
 Quinn — PR Manager | Avery — Booking Agent | Riley — Social Media Manager
 """
 
-# Voice mode: 150-word hard cap, zero formatting, fast sharp answers
+# Voice mode: short-spoken-turn cap, zero formatting, fast sharp answers.
+# VOICE_DIAGNOSIS.md Pass 3 §3.3/3.2: this used to say "150 words" (~800+
+# chars) and, separately, never actually applied to a real voice call (§2 —
+# `voice_mode` was driven by `do_tts`, which CallScreen/voice_probe.py never
+# set). Now wired to the real `voice` signal and tightened to match what this
+# hardware's Kokoro synth can actually turn around in a few seconds — see
+# VOICE_CHAR_CEILING's own comment for the measured basis. The character
+# ceiling below is the enforced backstop; this instruction is the primary
+# mechanism, so a compliant reply is never truncated mid-sentence.
 _VOICE_RULES = _RULES_SHARED + """
-VOICE MODE — HARD LIMIT: 150 words. Always. No exceptions.
-You are speaking on a live call. Be sharp. Be expert. Be complete in 150 words.
+VOICE MODE — you are speaking live on a phone call, not writing.
+Answer in ONE to TWO short spoken sentences — about 20 words, roughly 130 characters total. Be sharp. Be complete. Then stop.
+If you need more information, ask exactly ONE short question — never a colon followed by a list of sub-questions ("what date, what venue, what budget?"). One question, one clean sentence, end with a period or question mark.
 ZERO markdown. No asterisks, bullets, dashes, numbers, headers — plain spoken sentences only.
 Convert every list to flowing speech: "First... and critically... what you need to know is..."
-The artist asks follow-up questions to go deeper. Give the sharp answer, then stop.
+The artist asks follow-up questions to go deeper. Give the sharp answer, then stop talking.
 """
 
 # Text mode: full markdown, longer analysis allowed
@@ -764,14 +791,19 @@ async def synthesize_speech(text: str, voice: str, call_id: str = "") -> Optiona
                 })
                 return None
 
-            log.info("tts_stage_duration", extra={
-                "event": "tts_stage_duration", "call_id": call_id,
-                "stage": "kokoro_synth", "duration_ms": round((time.monotonic() - t_start) * 1000),
-            })
-
             buf = io.BytesIO()
             sf.write(buf, samples, sr, format='WAV')
             audio_bytes = buf.getvalue()
+
+            # VOICE_DIAGNOSIS.md Pass 3 §3.6: keep the synth-time/output-size/
+            # audio-length ratio visible on every call, not just duration_ms —
+            # that ratio is what section 1 measured as non-linear with text length.
+            audio_seconds = round(len(samples) / sr, 3) if sr else 0.0
+            log.info("tts_stage_duration", extra={
+                "event": "tts_stage_duration", "call_id": call_id,
+                "stage": "kokoro_synth", "duration_ms": round((time.monotonic() - t_start) * 1000),
+                "chars": len(text), "output_bytes": len(audio_bytes), "audio_seconds": audio_seconds,
+            })
 
             cache_file.write_bytes(audio_bytes)
             return audio_bytes
@@ -988,6 +1020,91 @@ def build_messages(history_list: list, message: str, cap: int) -> list:
 # ── SSE helper ─────────────────────────────────────────────────────────────────
 def sse(data: dict) -> str:
     return f"data: {json.dumps(data)}\n\n"
+
+# ── Voice turn: server-side character ceiling (VOICE_DIAGNOSIS.md Pass 3 §3.5) ─
+_SENTENCE_END_RE = re.compile(r'[.!?]')
+
+def _truncate_at_sentence(text: str, ceiling: int) -> str:
+    """Truncate text to at most `ceiling` chars, cutting at the last complete
+    sentence at or before the ceiling — never mid-word/mid-sentence.
+
+    If no sentence boundary exists within the ceiling itself (observed in
+    practice: a colon-led compound clarifying question with no period until
+    well past 130 chars — "I need a few specifics: what date, what venue,
+    what budget?"), look a SMALL bounded distance further for the sentence's
+    real end rather than cut it mid-thought — bounded to +60 chars so a rare
+    prompt violation can't drag synth time back toward the non-linear-cost
+    region measured in §1 (median ~21s by ~200 chars). Only if that still
+    finds nothing does this fall back to the last word boundary — never
+    mid-word, even in that worst case.
+    """
+    if len(text) <= ceiling:
+        return text
+    window = text[:ceiling]
+    last_end = -1
+    for m in _SENTENCE_END_RE.finditer(window):
+        last_end = m.end()
+    if last_end > 0:
+        return text[:last_end].rstrip()
+
+    extended = text[:ceiling + 60]
+    for m in _SENTENCE_END_RE.finditer(extended):
+        last_end = m.end()
+    if last_end > 0:
+        return text[:last_end].rstrip()
+
+    return (window.rsplit(" ", 1)[0] if " " in window else window).rstrip()
+
+
+async def _enforce_voice_char_ceiling(gen, ceiling: int):
+    """Wrap a chat_stream SSE generator (any agent's — this sits after every
+    generate_*/generate() path converges, so it is one choke point instead of
+    touching ~40 duplicated generators) so a voice turn's spoken reply never
+    exceeds `ceiling` characters. The prompt (§3.3) and max_tokens (§3.4) are
+    the primary mechanism; this is the backstop for when generation still runs
+    long. `text` events are forwarded until the ceiling is reached, then
+    suppressed; `done`'s full_text is truncated to match. route/experts/actions
+    events still pass through unchanged so handoffs and Marcus's actions_taken
+    keep working — only the spoken/transcript text is capped. Known, accepted
+    scope limit: for the rare do_tts=True inline-SSE-audio path, any per-
+    sentence `audio` events the underlying generator already queued for text
+    beyond the ceiling are not un-synthesized — CallScreen and voice_probe.py
+    both always set tts:false and fetch audio separately via /api/tts/synth
+    using the (now-capped) accumulated text, so that path is unaffected.
+    """
+    accumulated = ""
+    ceiling_hit = False
+    async for chunk in gen:
+        if not chunk.startswith("data: "):
+            yield chunk
+            continue
+        try:
+            payload = json.loads(chunk[len("data: "):].strip())
+        except Exception:
+            yield chunk
+            continue
+        etype = payload.get("type")
+        if etype == "text":
+            if ceiling_hit:
+                continue
+            new_text = payload.get("text", "")
+            accumulated += new_text
+            if len(accumulated) <= ceiling:
+                yield chunk
+            else:
+                clipped = _truncate_at_sentence(accumulated, ceiling)
+                already_sent_len = len(accumulated) - len(new_text)
+                remainder = clipped[already_sent_len:] if len(clipped) > already_sent_len else ""
+                if remainder:
+                    yield sse({"type": "text", "text": remainder})
+                ceiling_hit = True
+        elif etype == "done":
+            full_text = payload.get("full_text", "")
+            if len(full_text) > ceiling:
+                payload["full_text"] = _truncate_at_sentence(full_text, ceiling)
+            yield sse(payload)
+        else:
+            yield chunk
 
 # ── Startup env checks ─────────────────────────────────────────────────────────
 def _check_env():
@@ -8361,7 +8478,14 @@ class ChatStreamRequest(BaseModel):
     message:   str
     artist_id: str    = ""
     history:   str    = "[]"   # JSON-encoded array
-    tts:       bool   = True
+    tts:       bool   = True   # request inline SSE `audio` events for this turn (rarely used —
+                                # both CallScreen and voice_probe.py fetch audio via a separate
+                                # /api/tts/synth POST instead; see `voice` below, VOICE_DIAGNOSIS.md
+                                # Pass 3 §2 — do NOT treat this as "is this a voice call".
+    voice:     bool   = False  # True when the caller is a live voice call (CallScreen / voice_probe.py),
+                                # regardless of how audio actually reaches the client. Drives the
+                                # spoken-brevity system prompt and the voice token/char budget —
+                                # added in Pass 3 because `tts` alone never signals this in practice.
     turn_id:   str    = ""     # diagnostic correlation id only — see _stage_log; optional, back-compatible
 
 @app.post("/api/chat_stream")
@@ -8397,6 +8521,14 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
         history_list = []
 
     do_tts = tts_on.lower() == "true"
+    # VOICE_DIAGNOSIS.md Pass 3 §2: `do_tts` means "stream audio back inline over
+    # SSE" — CallScreen.js and voice_probe.py both always send tts:false and fetch
+    # audio via a separate /api/tts/synth POST instead (SSE is buffered on Railway),
+    # so `do_tts` was never actually True for a real voice call and the voice-mode
+    # system prompt + token cap below never fired. `req.voice` is the real signal;
+    # `or do_tts` is kept so a caller that DOES want inline SSE audio still counts
+    # as a voice turn too.
+    is_voice_turn = req.voice or do_tts
 
     if message == "__greet__":
         # Static, handcrafted greeting — zero API calls, so it must not require
@@ -8420,21 +8552,22 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
 
     has_history = len(history_list) > 0
 
-    system_blocks = build_system_blocks(agent, artist_id=artist_id, voice_mode=do_tts, has_history=has_history, question=message)
+    system_blocks = build_system_blocks(agent, artist_id=artist_id, voice_mode=is_voice_turn, has_history=has_history, question=message)
 
     # Use tighter history cap for voice (faster, cheaper); wider for text (more context)
-    history_cap = HISTORY_CAP_VOICE if do_tts else HISTORY_CAP_TEXT
+    history_cap = HISTORY_CAP_VOICE if is_voice_turn else HISTORY_CAP_TEXT
     messages    = build_messages(history_list, message, cap=history_cap)
 
     voice         = agent["voice"]
     tier          = load_artist(artist_id).get("tier", "")
     model, max_tokens = select_model(message, tier)
 
-    # Voice mode: hard cap at 300 tokens (~150 words) regardless of model
-    if do_tts:
-        max_tokens = 300
+    # Voice mode: hard cap on generation tokens — VOICE_CHAR_CEILING (below) is
+    # the real enforced backstop; see both constants' comments for the basis.
+    if is_voice_turn:
+        max_tokens = VOICE_MAX_TOKENS
 
-    print(f"[ROUTE] {agent['name']} | tier={tier or 'default'} | model={model.split('-')[1]} | voice={do_tts} | history={len(messages)-1} turns | max_tok={max_tokens}")
+    print(f"[ROUTE] {agent['name']} | tier={tier or 'default'} | model={model.split('-')[1]} | voice={is_voice_turn} (tts_inline={do_tts}) | history={len(messages)-1} turns | max_tok={max_tokens}")
 
     # Knowledge-bank experts consulted for this turn (deterministic, NO LLM) — the
     # same pure retrieval build_system_blocks already ran, surfaced to the client so
@@ -13563,8 +13696,11 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
         _stream_gen = generate_release_strategist
     else:
         _stream_gen = generate
+    gen_iter = _stream_gen()
+    if is_voice_turn:
+        gen_iter = _enforce_voice_char_ceiling(gen_iter, VOICE_CHAR_CEILING)
     return StreamingResponse(
-        _stream_gen(),
+        gen_iter,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

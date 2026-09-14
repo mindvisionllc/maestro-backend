@@ -141,6 +141,33 @@ def setup_logging() -> None:
     for noisy in ("uvicorn.access", "httpx", "httpcore"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
+    # anthropic SDK: its own "Retrying request to ... in N seconds" line (the
+    # one that shows up in our logs today) is INFO, but the status code that
+    # actually caused the retry (429/408/409/5xx, vs. a connection/timeout
+    # error with no status at all) is only ever logged by the SDK at DEBUG —
+    # invisible at our root INFO level, so a retry couldn't be attributed to a
+    # cause (VOICE_DIAGNOSIS.md Pass 3 §5 — investigate only, no retry-behavior
+    # change). Bump the SDK logger to DEBUG but filter it down to just the
+    # retry-cause lines instead of turning on its full per-request/response
+    # firehose (which would also be needlessly verbose in production).
+    class _AnthropicRetryCauseFilter(logging.Filter):
+        _ALLOW_PREFIXES = (
+            "Retrying due to status code",
+            "Retrying as header",
+            "Not retrying as header",
+            "Encountered httpx.TimeoutException",
+            "Raising timeout error",
+            "Raising connection error",
+        )
+        def filter(self, record: logging.LogRecord) -> bool:
+            if record.levelno >= logging.INFO:
+                return True
+            return record.getMessage().startswith(self._ALLOW_PREFIXES)
+
+    _anthropic_logger = logging.getLogger("anthropic")
+    _anthropic_logger.setLevel(logging.DEBUG)
+    _anthropic_logger.addFilter(_AnthropicRetryCauseFilter())
+
 
 def get_logger(name: str) -> logging.Logger:
     """Return a named logger. Requires setup_logging() called first."""
