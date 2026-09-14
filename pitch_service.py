@@ -9,6 +9,7 @@ Gmail tokens live inside the artist profile (follows main.py Postgres/SQLite rou
 """
 
 import os
+import asyncio
 from artist_identity import (
     ArtistAuthError,
     consume_oauth_state,
@@ -51,6 +52,12 @@ _GMAIL_SCOPES   = [
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/gmail.readonly",
 ]
+# Bounds send_email's blocking Gmail work (token refresh + the API call itself —
+# see send_email below). Comfortably under /api/chat_stream's Marcus tool-loop
+# per-call bound (MARCUS_CREATE_TIMEOUT_SECONDS in main.py, default 40s) and the
+# frontend's 60s SSE inactivity watchdog, so a stalled Gmail request surfaces a
+# clean, non-fatal tool_result instead of hanging the whole voice-call turn.
+GMAIL_SEND_TIMEOUT_SECONDS = float(os.environ.get("GMAIL_SEND_TIMEOUT_SECONDS", "20"))
 _SCHEDULER_ENABLED = os.environ.get("SCHEDULER_ENABLED", "").lower() == "true"
 _SCHEDULER_DRY_RUN = os.environ.get("SCHEDULER_ENABLED", "").lower() == "dry_run"
 _REPLY_POLL_HOURS  = int(os.environ.get("REPLY_POLL_HOURS", "6"))
@@ -203,6 +210,15 @@ class GmailNotConnected(Exception):
 
 
 class GmailAuthExpired(Exception):
+    pass
+
+
+class GmailSendTimeout(Exception):
+    """Raised when send_email's bounded Gmail call doesn't finish in time.
+
+    Distinct from GmailNotConnected/GmailAuthExpired — this is not an auth
+    problem, the request just didn't complete inside GMAIL_SEND_TIMEOUT_SECONDS.
+    """
     pass
 
 
@@ -471,20 +487,50 @@ async def send_email(
     Send a plain-text email via Gmail API on behalf of the artist.
     Returns {"message_id": ..., "thread_id": ..., "status": "sent"}.
     Raises GmailNotConnected or GmailAuthExpired on auth failure.
+    Raises GmailSendTimeout if the call doesn't finish within
+    GMAIL_SEND_TIMEOUT_SECONDS (see below).
     Retries up to 3 times on HTTP 429 with 1s/2s/4s backoff.
+
+    Root cause of a confirmed physical-device defect: every step here —
+    _get_gmail_service's token refresh (creds.refresh()) and
+    _gmail_execute_with_retry's request.execute() — is synchronous, blocking
+    network I/O with no timeout of its own, called directly inside this `async
+    def` with no executor. A stalled Gmail/Google-auth request therefore froze
+    the single asyncio event loop thread indefinitely: not just this call, but
+    every concurrently-handled request on the process, with nothing anywhere
+    (client or server) ever unblocking it — the same class of bug already fixed
+    for Kokoro TTS synthesis (see synthesize_speech/KOKORO_SYNTH_TIMEOUT_SECONDS
+    in main.py), just not this call site. Fixed the same way: push the blocking
+    work onto a thread via run_in_executor and bound the wait with
+    asyncio.wait_for + shield (shield because a thread running native/blocking
+    code cannot be safely interrupted mid-call — the same rationale documented
+    on that Kokoro fix).
     """
-    service = _get_gmail_service(artist_id)
-    msg = email.mime.text.MIMEText(body, "plain", "utf-8")
-    msg["to"]      = to
-    msg["subject"] = subject
-    if message_id_header:
-        msg["Message-ID"] = message_id_header
-    raw    = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-    t0 = datetime.now(timezone.utc)
-    result = _gmail_execute_with_retry(
-        service.users().messages().send(userId="me", body={"raw": raw}),
-        artist_id=artist_id,
-    )
+    def _do_send() -> dict:
+        service = _get_gmail_service(artist_id)
+        msg = email.mime.text.MIMEText(body, "plain", "utf-8")
+        msg["to"]      = to
+        msg["subject"] = subject
+        if message_id_header:
+            msg["Message-ID"] = message_id_header
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        return _gmail_execute_with_retry(
+            service.users().messages().send(userId="me", body={"raw": raw}),
+            artist_id=artist_id,
+        )
+
+    loop   = asyncio.get_event_loop()
+    worker = loop.run_in_executor(None, _do_send)
+    t0     = datetime.now(timezone.utc)
+    try:
+        result = await asyncio.wait_for(asyncio.shield(worker), timeout=GMAIL_SEND_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        log.error(
+            "gmail_send_timeout",
+            extra={"artist_id": artist_id, "action": "send",
+                   "timeout_seconds": GMAIL_SEND_TIMEOUT_SECONDS},
+        )
+        raise GmailSendTimeout(f"Gmail send did not complete within {GMAIL_SEND_TIMEOUT_SECONDS}s")
     latency_ms = int((datetime.now(timezone.utc) - t0).total_seconds() * 1000)
     log.info(
         "email_sent",

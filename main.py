@@ -97,6 +97,17 @@ TRANSCRIBE_TIMEOUT_SECONDS = float(os.environ.get("TRANSCRIBE_TIMEOUT_SECONDS", 
 # anywhere near the ~60s+ hang seen when a synth call got stuck.
 KOKORO_SYNTH_TIMEOUT_SECONDS = float(os.environ.get("KOKORO_SYNTH_TIMEOUT_SECONDS", "25"))
 
+# Bounds the Anthropic call(s) inside /api/chat_stream. Both must stay comfortably
+# under the frontend's 60s SSE inactivity watchdog (see streamChat's WATCHDOG_MS in
+# plmkr-frontend/src/utils/api.js) so the backend can emit a clean "error" SSE event
+# — with a safe, human message — before the client gives up and aborts blind.
+# ANTHROPIC_STREAM_TIMEOUT_SECONDS bounds the streaming path used by every non-tool
+# agent (generate()/_claude()); MARCUS_CREATE_TIMEOUT_SECONDS bounds each individual
+# messages.create() round-trip in Marcus's tool_use loop (generate_marcus()) — a
+# multi-iteration loop needs a per-call bound, not one bound for the whole loop.
+ANTHROPIC_STREAM_TIMEOUT_SECONDS = float(os.environ.get("ANTHROPIC_STREAM_TIMEOUT_SECONDS", "40"))
+MARCUS_CREATE_TIMEOUT_SECONDS    = float(os.environ.get("MARCUS_CREATE_TIMEOUT_SECONDS", "40"))
+
 # Cloud integrations (optional — graceful degradation when absent)
 CLOUDINARY_CLOUD_NAME = os.environ.get("CLOUDINARY_CLOUD_NAME", "")
 ELEVENLABS_API_KEY    = os.environ.get("ELEVENLABS_API_KEY", "")
@@ -1851,6 +1862,23 @@ async def _execute_marcus_tool(name: str, tool_input: dict, artist_id: str) -> t
                 },
                 {"input": f"curator={cname}", "result": "gmail_auth_expired"},
                 True,
+            )
+        except pitch_service.GmailSendTimeout:
+            # Root cause of the confirmed physical-device defect: send_email's Gmail
+            # API call is synchronous/blocking and was unbounded, so a stalled Gmail
+            # request hung this tool_use loop (and the whole /api/chat_stream turn)
+            # indefinitely — no text, no audio, no error, ever. send_email now bounds
+            # that call itself (GMAIL_SEND_TIMEOUT_SECONDS) and raises this instead of
+            # hanging; this is a normal, non-fatal tool_result (not gmail_not_connected
+            # — auth is fine, the request just didn't complete in time) so Marcus's
+            # loop continues and can tell the artist what happened in its own turn.
+            return (
+                {
+                    "error": "gmail_send_timeout",
+                    "message": "The email to this curator did not send in time. Try again shortly.",
+                },
+                {"input": f"curator={cname}", "result": "send_timeout"},
+                False,
             )
 
     return (
@@ -8351,7 +8379,21 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
                     messages=messages,
                     extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
                 ) as stream:
-                    async for chunk in stream.text_stream:
+                    # Bound TIME-TO-NEXT-CHUNK (including time-to-first-chunk), not total
+                    # stream duration — mirrors the frontend's own inactivity watchdog
+                    # (streamChat's WATCHDOG_MS in api.js) so a steady, healthy stream of
+                    # any length is unaffected, but a stall anywhere — including before
+                    # the very first token, the exact confirmed physical-device defect —
+                    # surfaces a clean error well inside that 60s client-side bound
+                    # instead of relying on the client to eventually give up blind.
+                    chunk_iter = stream.text_stream.__aiter__()
+                    while True:
+                        try:
+                            chunk = await asyncio.wait_for(
+                                chunk_iter.__anext__(), timeout=ANTHROPIC_STREAM_TIMEOUT_SECONDS,
+                            )
+                        except StopAsyncIteration:
+                            break
                         full_text += chunk
                         buf       += chunk
                         while True:
@@ -8374,6 +8416,14 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
                         if do_tts:
                             await tts_in.put(remainder)
 
+            except asyncio.TimeoutError:
+                log.error("chat_stream_claude_timeout", extra={
+                    "event": "chat_stream_claude_timeout",
+                    "artist_id": artist_id,
+                    "agent_id": agent_id,
+                    "timeout_seconds": ANTHROPIC_STREAM_TIMEOUT_SECONDS,
+                })
+                await evt_out.put(("error", f"{agent['name']} didn't respond in time. Please try again."))
             except Exception as e:
                 await evt_out.put(("error", str(e)))
             finally:
@@ -8478,13 +8528,20 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
                 final_text    = ""
                 last_text     = ""
                 for _ in range(MARCUS_MAX_TOOL_ITERS):
-                    resp = await async_client.messages.create(
-                        model=model,
-                        max_tokens=max_tokens,
-                        system=system_blocks,
-                        messages=loop_messages,
-                        tools=MARCUS_TOOLS,
-                        extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
+                    # Bound each round-trip individually — a multi-iteration loop can't
+                    # share one deadline across iterations without one stuck call still
+                    # hanging the whole turn. Comfortably under the frontend's 60s SSE
+                    # watchdog so a stalled call surfaces a clean error, not silence.
+                    resp = await asyncio.wait_for(
+                        async_client.messages.create(
+                            model=model,
+                            max_tokens=max_tokens,
+                            system=system_blocks,
+                            messages=loop_messages,
+                            tools=MARCUS_TOOLS,
+                            extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
+                        ),
+                        timeout=MARCUS_CREATE_TIMEOUT_SECONDS,
                     )
                     blocks    = list(getattr(resp, "content", []) or [])
                     tool_uses = [b for b in blocks if getattr(b, "type", None) == "tool_use"]
@@ -8540,6 +8597,16 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
                         await evt_out.put(("text", remainder))
                         if do_tts:
                             await tts_in.put(remainder)
+            except asyncio.TimeoutError:
+                # A stalled messages.create() call — asyncio.TimeoutError's own
+                # str() is empty, so give the artist a real sentence instead of
+                # blank text.
+                log.error("chat_stream_marcus_create_timeout", extra={
+                    "event": "chat_stream_marcus_create_timeout",
+                    "artist_id": artist_id,
+                    "timeout_seconds": MARCUS_CREATE_TIMEOUT_SECONDS,
+                })
+                await evt_out.put(("error", "Marcus didn't respond in time. Please try again."))
             except Exception as e:
                 await evt_out.put(("error", str(e)))
             finally:
