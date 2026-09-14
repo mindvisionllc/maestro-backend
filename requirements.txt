@@ -8,6 +8,7 @@ onnxruntime==1.24.3
 openai-whisper==20250625
 pydantic==2.12.5
 pydantic_core==2.41.5
+python-dotenv==1.2.2
 python-multipart==0.0.20
 soundfile==0.13.1
 stripe==14.4.1

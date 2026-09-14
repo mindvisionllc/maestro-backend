@@ -16,6 +16,16 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
+# Load .env / .env.local BEFORE any project module is imported — several
+# (artist_identity.py's SESSION_TTL_SECONDS, pitch_service.py's _DB_PATH, this
+# file's own ANTHROPIC_API_KEY a few lines below, ...) read os.environ at
+# import time, not lazily. Anchored to this file's own directory so it works
+# regardless of the process's cwd. override=False (dotenv's default) is load-
+# bearing: a real env var already set by the shell/Railway must always win
+# over anything in .env — this only fills gaps, never shadows production config.
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
 # Boot: structured logging must be configured before any other module imports
 from logging_config import setup_logging, get_logger, bind_request_id
 from artist_identity import (
