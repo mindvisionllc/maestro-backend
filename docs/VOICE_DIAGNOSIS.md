@@ -765,3 +765,64 @@ real; none of them, individually or together, explains the reported symptom
 and Phase 1 Q12's code-reading to find why it was invisible (the silent
 `onError`, now itself corrected but with its own follow-on defect in turn).
 
+---
+
+## PHASE 5 — Prove and commit
+
+**5.1** `voice_probe.py` was run 3 consecutive times against a live backend
+built from this session's final code (Phase 2's measurement section above).
+Two of three real stages are green every run (transcribe, and tts/synth
+verified independently); the third (`chat_stream`) is **correctly BLOCKED**,
+not green, because the one remaining external dependency — a valid
+`ANTHROPIC_API_KEY` — does not exist anywhere in this environment (see
+"remaining external dependency" below). This is not a shortfall in the fix:
+Phase 4.7's own verification (a well-formed-but-fake key) proves the
+post-gate code path itself is healthy (a real `401` in 157ms, routed to a
+clean SSE `error` event) — the gate is doing exactly its job of failing fast
+and cleanly on the one input this environment cannot supply. Re-running
+`python3 scripts/voice_probe.py --runs 3` once a real key is configured is
+the exact remaining step to see literal all-green output.
+
+**5.2** Focused tests added, run in isolation and together with each
+touched file's existing suite (no broad audit):
+
+Backend —
+```
+$ python3 -m pytest tests/test_marcus_tool_use.py tests/test_marcus_search_curators_schema.py \
+    tests/test_pitch_service.py tests/test_pitch_reply_scan_batch.py tests/test_gmail_send_timeout.py \
+    tests/test_chat_stream_timeout.py tests/test_r05_anthropic_graceful_degradation.py \
+    tests/test_tts_contracts.py tests/test_transcribe.py tests/test_kokoro_synth_timeout.py \
+    tests/test_kokoro_reload_warmup.py tests/test_r19_kokoro_startup_warning.py \
+    tests/test_ai_status_and_confirmation_gate.py -q
+........................................................................ [ 69%]
+...............................                                          [100%]
+103 passed, 1 warning in 61.00s
+```
+
+Frontend —
+```
+$ node --test tests/tts-synth-timeout.test.cjs tests/voice-session.test.cjs tests/voice-upload-contract.test.cjs \
+    tests/team-call-lifecycle.test.cjs tests/team-meeting-runner.test.cjs tests/chat-stream-turn-error.test.cjs \
+    tests/turn-generation-guard.test.cjs
+# tests 34
+# pass 34
+# fail 0
+```
+
+Babel (`@babel/core` + project-installed `babel-preset-expo`) transforms
+`CallScreen.js` and `api.js` cleanly. `git diff --check` clean, both repos.
+
+**5.3** Committed locally in both repos, both clean, nothing pushed:
+
+- `maestro-backend`: `db1da91` (prior turn's start) → `7c9231d` (prior turn's
+  fix) → **`90dfb94`** (this pass: diagnosis doc, instrumentation, probe,
+  confirmation gate, `ai_available`).
+- `plmkr-frontend`: `5709f87` (prior turn's start) → `243f592` (prior turn's
+  fix) → **`892461e`** (this pass: turnGenRef, honest error messages,
+  degraded-mode banner).
+
+**5.4** See the final report delivered in-conversation for the complete
+write-up (proven root cause, why prior fixes failed, per-commit verdicts,
+final design, files/SHAs, test results, remaining dependency, starting/ending
+HEADs, `git status --porcelain`, and the one physical-iPhone test).
+
