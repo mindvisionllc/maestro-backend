@@ -13710,6 +13710,19 @@ def _twilio_verify_config() -> tuple[str, str, str]:
     return account_sid, auth_token, verify_sid
 
 
+def _require_identity_configured() -> None:
+    """Fail closed: OTP auth is unusable unless the signed-session secrets are configured.
+
+    Without them a verified phone could never receive the canonical signed artist
+    session, so neither route may proceed (and no provider verification is spent).
+    """
+    if not identity_configured():
+        log.error("otp_config_invalid", extra={
+            "event": "otp_config_invalid", "keys": "PLMKR_SESSION_SECRET,PLMKR_IDENTITY_SECRET",
+        })
+        raise _otp_error(OTP_ERR_NOT_CONFIGURED, 503)
+
+
 def _build_twilio_client(account_sid: str, auth_token: str):
     """Construct the Twilio REST client. Patched in tests — never called with real credentials there."""
     from twilio.http.http_client import TwilioHttpClient
@@ -13811,6 +13824,7 @@ async def send_otp(payload: SendOtpRequest):
     """Start a Twilio Verify SMS verification for the canonical phone number."""
     _clean_otp_store()
     phone = _canonical_phone_or_400(payload.phone)
+    _require_identity_configured()
 
     # R-17 dev bypass (local only — boot exits if RAILWAY_ENVIRONMENT or a Verify SID is set).
     if SMS_OTP_DEV_BYPASS:
@@ -13874,6 +13888,7 @@ def _count_failed_attempt(phone: str, entry: dict, category: str) -> dict:
 async def verify_otp(payload: VerifyOtpRequest):
     """Check the submitted code with Twilio Verify and issue the canonical signed artist session."""
     phone = _canonical_phone_or_400(payload.phone)
+    _require_identity_configured()
     submitted_code = (payload.code or "").strip()
     entry = _otp_store.get(phone)
 
@@ -13919,11 +13934,14 @@ async def verify_otp(payload: VerifyOtpRequest):
     _otp_store.pop(phone, None)
     log.info("otp_verified", extra={"event": "otp_verified", "phone": _phone_tag(phone)})
 
-    # Preserve old local behavior until the two identity secrets are configured.
-    if not identity_configured():
-        return {"valid": True}
-
-    fingerprint = phone_fingerprint(phone)
+    # An approved verification is only ever answered with the canonical signed session.
+    # A bare {"valid": true} without a session is never returned: the client could not
+    # persist an identity from it and would fail at the next authenticated step.
+    try:
+        fingerprint = phone_fingerprint(phone)
+    except ArtistAuthError:
+        log.error("otp_config_invalid", extra={"event": "otp_config_invalid", "keys": "PLMKR_IDENTITY_SECRET"})
+        raise _otp_error(OTP_ERR_NOT_CONFIGURED, 503)
     matching_profile = None
 
     profiles = _pg_all() if DATABASE_URL else _sqlite_all_artists()
@@ -13950,7 +13968,11 @@ async def verify_otp(payload: VerifyOtpRequest):
         _save_artist_file(artist_id, profile)
         returning_artist = False
 
-    session = issue_session(artist_id)
+    try:
+        session = issue_session(artist_id)
+    except ArtistAuthError:
+        log.error("otp_config_invalid", extra={"event": "otp_config_invalid", "keys": "PLMKR_SESSION_SECRET"})
+        raise _otp_error(OTP_ERR_NOT_CONFIGURED, 503)
     return {
         "valid": True,
         "artist_id": artist_id,

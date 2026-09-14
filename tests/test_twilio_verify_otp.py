@@ -444,3 +444,61 @@ def test_provider_failure_logs_carry_no_secrets_or_raw_text(verify_app, caplog):
     assert "otp_provider_failure" in joined
     for forbidden in ("\x1b", "/Accounts/", _ACCOUNT_SID, _AUTH_TOKEN, _VERIFY_SID, "+14165551234", "15550001234", "twilio.com"):
         assert forbidden not in joined
+
+
+# ── Approved-response contract: signed session or fail closed ──────────────────
+
+def test_approved_response_carries_complete_signed_session_contract(verify_app):
+    main, monkeypatch = verify_app
+    _install(main, monkeypatch, FakeService(check_status="approved"))
+    client = _client(main)
+    _send(client, "4165551234")
+    data = _verify(client, "4165551234", "123456").json()
+    assert data["valid"] is True
+    assert isinstance(data["artist_id"], str) and data["artist_id"].startswith("artist_")
+    assert isinstance(data["access_token"], str) and data["access_token"]
+    assert data["token_type"] == "Bearer"
+    assert isinstance(data["expires_in"], int) and isinstance(data["expires_at"], int)
+    assert data["profile"]["artist_id"] == data["artist_id"]
+    assert data["returning_artist"] is False and data["profile"]["onboarded"] is False
+    # The session is immediately usable through the existing bearer authorization path.
+    saved = client.post(
+        "/api/artist/save",
+        json={"artist_id": data["artist_id"], "name": "Test Artist", "onboarded": True},
+        headers={"Authorization": "Bearer " + data["access_token"]},
+    )
+    assert saved.status_code == 200, saved.status_code
+
+
+@pytest.mark.parametrize("missing", ["PLMKR_SESSION_SECRET", "PLMKR_IDENTITY_SECRET"])
+def test_missing_identity_secret_never_yields_bare_valid_true(verify_app, missing):
+    main, monkeypatch = verify_app
+    fake = _install(main, monkeypatch, FakeService(check_status="approved"))
+    client = _client(main)
+    _send(client, "4165551234")                                   # configured at send time
+    monkeypatch.delenv(missing)
+    resp = _verify(client, "4165551234", "123456")
+    assert resp.status_code == 503
+    assert resp.json()["detail"]["code"] == "auth_not_configured"
+    assert "valid" not in resp.json() and "access_token" not in resp.text
+    _assert_sanitized(resp)
+    assert fake.service.verification_checks.create.call_count == 0   # no provider check spent
+    assert "+14165551234" in main._otp_store                        # pending state kept for retry
+
+    # Send is also refused before any provider call when the session secrets are absent.
+    main._otp_send_history.clear()
+    send = _send(client, "4165551234")
+    assert send.status_code == 503 and send.json()["detail"]["code"] == "auth_not_configured"
+    assert fake.service.verifications.create.call_count == 1
+
+
+def test_short_identity_secret_fails_closed_after_approval(verify_app):
+    main, monkeypatch = verify_app
+    _install(main, monkeypatch, FakeService(check_status="approved"))
+    client = _client(main)
+    _send(client, "4165551234")
+    monkeypatch.setenv("PLMKR_SESSION_SECRET", "too-short")     # present but unusable
+    resp = _verify(client, "4165551234", "123456")
+    assert resp.status_code == 503
+    assert resp.json()["detail"]["code"] == "auth_not_configured"
+    assert "access_token" not in resp.text and "too-short" not in resp.text

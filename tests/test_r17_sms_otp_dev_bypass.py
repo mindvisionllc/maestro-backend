@@ -29,6 +29,8 @@ def _build_client(monkeypatch, tmp_path, **extra_env):
     monkeypatch.setenv("PLMKR_API_KEY",     _PLMKR_KEY)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setenv("APP_BASE_URL",      "https://test.example.com")
+    monkeypatch.setenv("PLMKR_SESSION_SECRET",  "session-secret-" + ("s" * 48))
+    monkeypatch.setenv("PLMKR_IDENTITY_SECRET", "identity-secret-" + ("i" * 48))
     monkeypatch.delenv("RAILWAY_ENVIRONMENT", raising=False)
     monkeypatch.delenv("SMS_OTP_DEV_BYPASS",  raising=False)
     for k in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_VERIFY_SERVICE_SID", "TWILIO_VERIFY_SID"):
@@ -131,7 +133,9 @@ def test_verify_otp_succeeds_after_dev_bypass_with_000000(monkeypatch, tmp_path)
         headers={"X-API-Key": _PLMKR_KEY},
     )
     assert resp.status_code == 200
-    assert resp.json().get("valid") is True
+    data = resp.json()
+    assert data.get("valid") is True
+    assert data["artist_id"].startswith("artist_") and data["access_token"]
 
 
 def test_bypass_disabled_normal_flow_returns_503_when_twilio_unconfigured(monkeypatch, tmp_path):
