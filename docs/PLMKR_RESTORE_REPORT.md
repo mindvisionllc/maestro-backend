@@ -317,7 +317,7 @@ branch was cut for it):
 ## 7. Repository HEADs and worktree status (at report time)
 
 ```
-maestro-backend:   feat/buffer-profile-discovery @ (see `git log -1` after commit below)
+maestro-backend:   feat/buffer-profile-discovery @ 0c1edd1f30a217e91d8c5fdc3b86b11dc8ea57ad
                    worktree clean after commit
 plmkr-frontend:    feat/social-buffer-execution  @ 6beae496fc0ac6a5dc821d8b244fca8286926892
                    worktree clean (no changes made)
