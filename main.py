@@ -163,7 +163,7 @@ def _stage_log(turn_id: str, stage: str, t0: float, **fields) -> None:
 
 # Cloud integrations (optional — graceful degradation when absent)
 CLOUDINARY_CLOUD_NAME = os.environ.get("CLOUDINARY_CLOUD_NAME", "")
-ELEVENLABS_API_KEY    = os.environ.get("ELEVENLABS_API_KEY", "")
+ELEVENLABS_API_KEY    = os.environ.get("ELEVENLABS_API_KEY", "").strip()
 DATABASE_URL: str     = os.environ.get("DATABASE_URL", "")  # Railway PostgreSQL — persists artist profiles
 
 
