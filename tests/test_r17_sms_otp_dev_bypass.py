@@ -33,11 +33,19 @@ def _build_client(monkeypatch, tmp_path, **extra_env):
     monkeypatch.setenv("PLMKR_IDENTITY_SECRET", "identity-secret-" + ("i" * 48))
     monkeypatch.delenv("RAILWAY_ENVIRONMENT", raising=False)
     monkeypatch.delenv("SMS_OTP_DEV_BYPASS",  raising=False)
+    # Pass 4 (VOICE_DIAGNOSIS.md §H): setenv("") not delenv — main.py's
+    # top-level load_dotenv(override=False) only skips a key already
+    # *present* in os.environ. delenv makes these look unset, so the
+    # importlib.reload(main) below silently refills them from the real
+    # .env (which, since scripts/setup_local_secrets.sh was run, now has
+    # real Twilio values) — reintroducing the exact bug this fixture exists
+    # to keep out. Every consumer here (_TWILIO_*_RE, _twilio_verify_service_sid())
+    # already treats "" the same as absent.
     for k in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_VERIFY_SERVICE_SID", "TWILIO_VERIFY_SID"):
-        monkeypatch.delenv(k, raising=False)
+        monkeypatch.setenv(k, "")
     for k, v in extra_env.items():
         if v is None:
-            monkeypatch.delenv(k, raising=False)
+            monkeypatch.setenv(k, "")
         else:
             monkeypatch.setenv(k, str(v))
 

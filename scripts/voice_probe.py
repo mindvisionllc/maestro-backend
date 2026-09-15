@@ -109,7 +109,13 @@ class StageResult:
 def run_probe(base_url: str, turn_id: str, timeout_s: float = 90.0):
     """One full transcribe -> chat_stream -> tts pass. Returns list[StageResult]."""
     results = []
-    client = httpx.Client(timeout=timeout_s)
+    # Pass 4: every stage here is now identity-scoped (PLMKR restoration,
+    # same day) — a locally-signed session, never a real Twilio/SMS OTP, so
+    # this probe passes auth. Read from env, never hardcoded/logged; see
+    # tts_latency_probe.py's matching comment for how to mint one.
+    bearer = os.environ.get("PLMKR_PROBE_BEARER_TOKEN", "")
+    headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
+    client = httpx.Client(timeout=timeout_s, headers=headers)
 
     # ── (a) transcribe ───────────────────────────────────────────────────────
     if not FIXTURE_PATH.exists():
@@ -192,10 +198,16 @@ def run_probe(base_url: str, turn_id: str, timeout_s: float = 90.0):
     # blanket "assume everything is relevant" relaxation.
     lower = full_text.lower().strip()
     relevant = any(kw in lower for kw in EXPECTED_REPLY_KEYWORDS) or lower.startswith("i need")
+    # Pass 4 (VOICE_DIAGNOSIS.md §B1): this used to print full_text[:120] — a
+    # raw, non-word-boundary-aware slice for terminal display only. That slice
+    # itself produced the "...curren" mid-word artifact seen in a Pass 3 run;
+    # the actual server-side text (this variable) is never cut mid-word (see
+    # _truncate_at_sentence's word-boundary fallback) — printing it in full
+    # is what B4/I3 need and is what was actually misdiagnosed before.
     if not relevant:
-        results.append(r.fail(ms, f"reply present but not topically relevant: \"{full_text[:120]}\""))
+        results.append(r.fail(ms, f"reply present but not topically relevant: \"{full_text}\""))
     else:
-        results.append(r.pass_(ms, f'"{full_text[:120]}"'))
+        results.append(r.pass_(ms, f'"{full_text}"'))
 
     # ── (c) tts/synth ────────────────────────────────────────────────────────
     t0 = time.monotonic()
@@ -263,8 +275,10 @@ def check_loop_blocking(base_url: str):
     transcription is in flight, and time it. A single-worker event loop that
     is genuinely blocked (not just busy) by the transcription would delay
     this far beyond its own normal (~ms) latency."""
-    client_a = httpx.Client(timeout=60.0)
-    client_b = httpx.Client(timeout=10.0)
+    bearer = os.environ.get("PLMKR_PROBE_BEARER_TOKEN", "")
+    headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
+    client_a = httpx.Client(timeout=60.0, headers=headers)  # /api/transcribe — identity-scoped
+    client_b = httpx.Client(timeout=10.0)                    # /health — never scoped
     health_result = {}
 
     def do_transcribe():

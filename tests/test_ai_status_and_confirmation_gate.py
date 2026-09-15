@@ -25,7 +25,15 @@ def _load_main(monkeypatch, tmp_path, *, with_key: bool):
     if with_key:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     else:
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        # Pass 4 (VOICE_DIAGNOSIS.md §H): setenv("") not delenv — this reload
+        # re-runs main.py's top-level load_dotenv(), whose override=False
+        # only skips a key already *present* in os.environ. delenv makes it
+        # look absent again, so the reload silently refills it from the real
+        # .env (which does have a real ANTHROPIC_API_KEY), defeating the
+        # "without a key" scenario this test exists to cover. An empty
+        # string still reads as falsy everywhere that matters
+        # (ANTHROPIC_AVAILABLE = bool(ANTHROPIC_API_KEY)).
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     monkeypatch.setenv("DB_PATH", str(tmp_path / "test.db"))
     monkeypatch.setenv("DATABASE_URL", "")
     monkeypatch.setenv("AUDIO_CACHE_DIR", str(tmp_path / "audio_cache"))

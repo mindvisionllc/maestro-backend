@@ -25,6 +25,7 @@ import argparse
 import base64
 import io
 import json
+import os
 import statistics
 import sys
 import time
@@ -82,19 +83,56 @@ def _wav_duration_seconds(wav_bytes: bytes) -> float:
         return frames / float(rate) if rate else 0.0
 
 
+def _assert_tts_healthy(client: "httpx.Client", base_url: str) -> dict:
+    """VOICE_DIAGNOSIS.md §D2 (Pass 4): read before each length series via the
+    C4 health fields (main.py's /api/tts/status) — never trust a series that
+    started while the worker was dead or already suspiciously close to
+    stalling; that would measure recovery/queue time, not synth time, the
+    exact contamination this pass exists to rule out."""
+    resp = client.get(f"{base_url}/api/tts/status")
+    resp.raise_for_status()
+    return resp.json()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base-url", default="http://127.0.0.1:8000")
     ap.add_argument("--voice", default="am_onyx", help="Marcus's Kokoro voice ID")
     ap.add_argument("--iterations", type=int, default=N_ITERATIONS)
+    ap.add_argument("--lengths", default=None,
+                     help="Comma-separated char-length targets, e.g. 100,130,160,200,300,450 "
+                          "(default: the module's own CHAR_LENGTHS)")
+    ap.add_argument("--out", default=None,
+                     help="Path for the raw-data JSON dump (default: docs/tts_latency_probe_raw.json)")
     args = ap.parse_args()
+    lengths = [int(x) for x in args.lengths.split(",")] if args.lengths else CHAR_LENGTHS
 
-    client = httpx.Client(timeout=60.0)
+    # Pass 4: /api/tts/synth is now identity-scoped (PLMKR restoration, same
+    # day) — this script never talks to Twilio/SMS, it just needs a locally-
+    # signed session so its own requests pass artist-scope auth. Read from
+    # env, never hardcoded/logged: mint one with
+    #   PLMKR_SESSION_SECRET=... PLMKR_IDENTITY_SECRET=... python3 -c \
+    #     "import artist_identity as a; print(a.issue_session('tts-latency-probe-artist')['access_token'])"
+    bearer = os.environ.get("PLMKR_PROBE_BEARER_TOKEN", "")
+    headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
+    client = httpx.Client(timeout=60.0, headers=headers)
     print(f"tts_latency_probe.py against {args.base_url}  voice={args.voice}  "
-          f"iterations/length={args.iterations}\n")
+          f"iterations/length={args.iterations}  lengths={lengths}\n")
 
     rows = []  # (chars, [ms...], [bytes...], [audio_s...])
-    for target_len in CHAR_LENGTHS:
+    for target_len in lengths:
+        # D2: assert health before the series; on a wedged/dead worker, wait
+        # briefly for the supervisor's own kill+respawn (main.py §C) to
+        # finish, then re-check once before giving up on this series.
+        status = _assert_tts_healthy(client, args.base_url)
+        if status.get("wedged") or not status.get("worker", {}).get("alive", True):
+            print(f"  chars~{target_len}: TTS not healthy before this series "
+                  f"({status}) — waiting 5s and re-checking once")
+            time.sleep(5)
+            status = _assert_tts_healthy(client, args.base_url)
+            if status.get("wedged") or not status.get("worker", {}).get("alive", True):
+                print(f"  chars~{target_len}: SKIPPED — still not healthy ({status})")
+                continue
         ms_list, bytes_list, dur_list, chars_list = [], [], [], []
         for it in range(args.iterations):
             text = _make_text(target_len, it)
@@ -166,7 +204,9 @@ def main():
             for t, chars_list, ms_list, bytes_list, dur_list in rows
         ],
     }
-    out_path = Path(__file__).resolve().parent.parent / "docs" / "tts_latency_probe_raw.json"
+    out_path = Path(args.out) if args.out else (
+        Path(__file__).resolve().parent.parent / "docs" / "tts_latency_probe_raw.json"
+    )
     out_path.write_text(json.dumps(out, indent=2))
     print(f"\nraw data written to {out_path}")
 

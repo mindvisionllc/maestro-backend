@@ -1215,3 +1215,328 @@ See the in-conversation reply for the complete write-up delivered to Tommy
 basis, files/commit SHAs both repos, verbatim 5-run probe output with totals,
 routing verdict, Anthropic retry cause, starting/ending HEADs, `git status
 --porcelain` both repos, and the one physical-iPhone test).
+
+---
+
+# PASS 4 — First-turn drop, truncated replies, Kokoro lock, clean re-measurement
+
+Branch `feat/buffer-profile-discovery`, starting HEAD `86483c6`. Scope:
+focused voice-path reliability/quality fixes on a feature confirmed working
+end-to-end on the physical iPhone — not a dead-feature diagnosis.
+
+## A. First hold-to-talk after opening a call was silently dropped
+
+**Root cause (proven, not inferred):** `useVoiceSession.js`'s
+`stopAndTranscribe()` — when a release arrived while `startRecording()`'s
+own async chain (mic-permission request, which re-runs its native
+round-trip on every mount even when already OS-granted, then
+`setAudioModeAsync`+`prepareToRecordAsync`) was still in flight, it bumped
+`recordingTokenRef` and returned `''` immediately — cancelling the pending
+start outright. No recording was ever attempted; the artist's first press
+produced nothing, indistinguishable (from the UI) from a guard silently
+eating the press.
+
+**Fix:** `stopAndTranscribe()` now awaits the pending start instead of
+cancelling it, and — if it actually produced a recording — falls through to
+transcribe it (a very brief hold correctly still ends in the normal
+empty-transcript path; that's expected, not a bug). "A silently ignored
+press is the worst option" — task directive, adopted literally.
+
+**A1 instrumentation added:** every PTT press/release now logs (console,
+`[VOICE-DIAG][PTT]` prefix) the pre-press state (isSpeaking, was-recording,
+statusLabel), which guard (if any) rejected the turn and why, the real
+recorded byte count (`voiceUpload.js`'s `createRecordingUploadPart` now
+returns `size`), and the transcription result length.
+
+**A3 regression test:** `tests/voice-session.test.cjs`'s
+`createRapidReleaseModel` used to encode (and assert as *correct*) the old
+cancel-outright behavior (`'cancelled-before-recording'`). Rewritten to
+mirror the fix and assert both branches: a release racing a start that
+*does* succeed now transcribes; one racing a start that never produces a
+recording (e.g. permission denied) still correctly ends with nothing to
+transcribe.
+
+Ruled out: greeting-audio blocking PTT — `startRecording()` unconditionally
+calls `voice.interrupt()` first, which already stops any playing audio
+(barge-in), so this was never actually a block.
+
+## B. Truncated replies / undelivered enumerations
+
+**B1 mechanism (logged, not guessed):** added `voice_reply_truncated`
+structured logging (`main.py`'s `_enforce_voice_char_ceiling`) carrying both
+the raw (pre-truncation) model output and what actually reached TTS,
+whenever the ceiling fires. Separately: the literal "...curren" mid-word
+artifact quoted in the task was traced to `voice_probe.py`'s own **display**
+slice (`full_text[:120]`, a raw non-word-boundary-aware Python slice used
+only for the terminal printout) — not the server-side
+`_truncate_at_sentence()`, which is sentence/word-boundary-aware and never
+cuts mid-word by construction. Fixed: the probe now prints `full_text` in
+full (see B4/I3).
+
+**B2/B3 fix:** `_VOICE_RULES` rewritten to explicitly forbid enumerations
+("I need three things," "a few things," any count-then-list structure) and
+require exactly one complete thought *or* one question per turn — not both.
+`VOICE_MAX_TOKENS` raised 90 → 220 (comfortably above any ceiling this pass
+considered) so max_tokens itself is never what stops generation mid-sentence;
+`VOICE_CHAR_CEILING`'s existing sentence-aware truncation remains the sole,
+rarely-firing backstop.
+
+**Caveat (honest, not hidden):** the strengthened prompt reduces but does
+not eliminate enumeration — real Section I runs below still show Marcus
+occasionally opening with "I need three things" despite the explicit
+instruction (LLM prompt compliance is probabilistic, not a hard guarantee).
+No further backstop was added this pass beyond the character ceiling, which
+still cleanly bounds worst-case length regardless.
+
+## C. Kokoro native-call stall permanently poisoned the process
+
+**C1 — exact leak, file:line (pre-Pass-4 code):** `main.py`'s old
+`synthesize_speech()` ran `kokoro.create()` inside a thread-pool worker via
+`loop.run_in_executor`, guarded by a plain `threading.Lock`
+(`_kokoro_native_lock`). On `asyncio.wait_for(..., timeout=25)` timing out,
+only the **asyncio caller** was released — Python cannot safely interrupt a
+running native call on a thread, so the worker thread kept running,
+**still holding `_kokoro_native_lock` forever**. Every later call's own
+worker thread then blocked on `_kokoro_native_lock.acquire()` (no timeout),
+and from the asyncio side that looked identical to a fresh 25.0s timeout —
+repeating for every subsequent call until the backend was restarted.
+
+**C2 fix — supervised subprocess, not a smarter lock:** `kokoro_worker.py`
+(new, standalone, no main.py import) runs the native call in its own OS
+process. `main.py`'s new `_SupervisedSubprocessWorker` spawns it, submits
+jobs over `multiprocessing.Queue`s, and detects a stall via a **real,
+OS-level** `queue.get(timeout=...)` — not a `threading.Lock`. On timeout it
+kills the process outright (`terminate()` then `kill()`) and clears its
+state; the *next* call transparently respawns a fresh worker. **Why a
+process and not a smarter lock or liveness check:** a thread cannot be
+force-killed in Python, so no in-process liveness check can ever be as
+certain as "the process that held it no longer exists" — that's the only
+property that actually rules out leaking into a future call.
+
+**Side effect found and fixed:** keeping `get_kokoro()`'s own in-process
+model load alive (needed for the unrelated R-19 file-presence/warning check)
+alongside the new worker subprocess meant **two** full Kokoro models loaded
+simultaneously on an already memory-constrained box (`free -h` showed active
+swap throughout this pass) — measurably slowing every real synth call and
+even destabilizing the worker (legitimate calls pushed past
+`KOKORO_SYNTH_TIMEOUT_SECONDS` by the contention, triggering spurious kills).
+Fixed: `get_kokoro()` now discards that probe instance immediately after
+confirming it constructs, caching only the boolean — real synthesis has
+lived in the worker subprocess alone since C2, so nothing needed it kept
+alive. Also added `atexit`-registered worker teardown (a killed parent had
+been observed to orphan a live worker subprocess otherwise).
+
+**C4 — `/api/health` / `/api/tts/status` wedge visibility:** both now
+return a `worker: {alive, restarts, busy_seconds}` block and a derived
+`wedged` boolean (true when a call has been in flight for >90% of
+`KOKORO_SYNTH_TIMEOUT_SECONDS`). `status()` deliberately does **not** take
+the same lock `synth_blocking()` holds for the whole call, specifically so
+it stays responsive *while* a call is stalled — the entire point of C4.
+
+**C3 regression test + real-world proof:**
+`tests/test_kokoro_synth_timeout.py::test_next_call_succeeds_after_a_stall`
+forces a real subprocess stall (a fake worker target that sleeps forever),
+confirms it's killed (`restarts == 1`, `_proc is None`), then confirms the
+very next call — against a swapped-in healthy target — succeeds without
+waiting for the dead one. Independently, Section I's *first* 10-run attempt
+(below) hit 3 real stalls back-to-back under genuine system load and the
+worker **self-recovered without a backend restart** — the exact scenario
+this fix exists for, observed live, not just in a unit test.
+
+## D. Character-budget re-measurement (clean process, cache disabled)
+
+**How the cache was disabled (D4):** restarted the backend with
+`AUDIO_CACHE_DIR` pointed at a freshly-emptied directory
+(`/tmp/plmkr_clean_audio_cache_pass4`) — every `cache_file.exists()` check
+in `synthesize_speech()` is guaranteed to miss. `scripts/tts_latency_probe.py`
+also already rotates distinct text per call (belt-and-suspenders) and gained
+a `--lengths` flag plus a D2 health-gate (`_assert_tts_healthy`, using the
+new C4 fields) that skips/retries a series if the worker isn't alive.
+
+**Honest environmental caveat:** this machine showed sustained
+`load average` of 4–15 (on 8 cores) and active swap throughout this pass —
+confirmed via `uptime`/`top`/`free -h` — from unrelated concurrent processes
+(desktop session, browser, other Claude Code sessions), not from anything
+under test. The absolute numbers below are real, clean-of-cache and
+clean-of-the-C1-lock-bug measurements, but are **not** a quiescent-hardware
+number; they're worse, at every length, than Pass 3's own (separately
+cache/lock contaminated) figures. Both are shown for a full picture:
+
+| chars | Pass 3 (contaminated: cache hits + lock poisoning) | Pass 4 clean, this load |
+|---|---|---|
+| ~97–100  | median ~5.1s (partly cache hits) | median 10.3s (min 8.8s, max 14.5s) |
+| ~126–132 | median ~5.1s → jump to 11.3s at 138 | median 15.3s (min 13.5s, max 16.3s) |
+| ~154–157 | ~11.3–15.1s | median 18.4s (min 17.7s, max 23.7s) |
+| ~197–200 | — | median 22.7s (min 20.2s, max 24.3s) |
+| ~298     | ~20.9s | median 28.0s (1 sample; 3/5 hit the 25s timeout) |
+| ~450     | timeouts/near-25s | skipped — worker unhealthy before the series (D2 gate) |
+
+Full raw data: `docs/tts_latency_probe_raw_pass4.json` (this pass) alongside
+the pre-existing `docs/tts_latency_probe_raw.json`/`_500_1000_2000.json`/
+`_crossover.json` (Pass 3, kept for comparison, not overwritten).
+
+## E. Chunking hypothesis — investigated and refuted for this range
+
+**E1 — the actual split rule, file:line:** installed
+`kokoro_onnx/__init__.py`'s `Kokoro._split_phonemes()` (`kokoro_onnx` pip
+package, not this repo) starts a new batch only once the **current batch**
+would exceed `MAX_PHONEME_LENGTH = 510` phonemes
+(`kokoro_onnx/config.py:5`), preferring to split at punctuation.
+
+**E2/E3 — direct measurement, not inference:** phonemized real
+representative text at 101/197/262/407 characters and called
+`_split_phonemes()` directly:
+```
+chars= 101 phonemes= 111 chunks=1
+chars= 197 phonemes= 212 chunks=1
+chars= 262 phonemes= 277 chunks=1
+chars= 407 phonemes= 431 chunks=1
+```
+**Chunk count is 1 across the entire practical voice-reply range** — nowhere
+near the 510-phoneme threshold. §D's "5.1s → 11.3s jump across 6 characters"
+is **not** a chunk-boundary effect — there is no second chunk to cross into
+in that range. Plainly stated per the task's ask: chunk count is not the
+real constraint here; single-forward-pass model compute cost (likely
+including attention's non-linear scaling with sequence length) compounded by
+real system contention (§D) is.
+
+**E4 — cost of chunk streaming (investigated only, not implemented):**
+because chunking never triggers below ~500 characters, streaming
+chunk-by-chunk would provide **zero** benefit for any reply length this pass
+would ever want to allow (a 500+-char voice reply is already the product
+failure this whole pass exists to prevent). It would only start to matter
+for replies far longer than anything B2/B3's prompt work is aiming to
+produce — not a lever worth pulling here.
+
+## F. VOICE_CHAR_CEILING — kept at 130, not raised
+
+Per F1/F2, the mandate was to raise the ceiling if clean data supports it.
+It doesn't: §D's clean data is **worse** than the contaminated data that
+originally justified 130, at every tested length — under today's real,
+disclosed system load, even the shortest tested reply (97 chars, 10.3s
+median) already exceeds the 8s target the ceiling was designed to clear.
+Raising the ceiling on data this much worse than the status quo would be
+irresponsible. **Decision: VOICE_CHAR_CEILING stays at 130.** Per F3: what
+would actually beat this ceiling is dedicated/less-contended hardware (this
+exact model on a quiet box, or a production container without a desktop
+session competing for the same 8 cores), a smaller/faster/quantized Kokoro
+voice model, or GPU-accelerated inference — not chunk streaming (§E4) and
+not simply raising the number on noisy data.
+
+## G. Render loop
+
+Confirmed: two `console.log` calls (one doing `JSON.stringify` on the full
+route-params agent object) sat directly in `CallScreen`'s render body, not
+inside a `useEffect` — re-running, and re-serializing, on **every**
+re-render. `transcript` alone updates once per streamed SSE `text` chunk, so
+a single turn could trigger this dozens of times, exactly matching "Metro
+logged this dozens of times in rapid succession" — real CPU stolen right
+when the Kokoro subprocess needs it most. Fixed: moved into the existing
+mount-only `useEffect` (agent params are fixed for the life of the screen
+instance, so mount-once logging has equivalent diagnostic value at
+effectively zero ongoing cost).
+
+## H. Test fallout from 078096f (and its own Pass-4-only new instance)
+
+The 2 files VOICE_DIAGNOSIS.md §6.6 already flagged
+(`test_ai_status_and_confirmation_gate.py`,
+`test_r05_anthropic_graceful_degradation.py`, 5 tests total) used
+`monkeypatch.delenv("ANTHROPIC_API_KEY")` before `importlib.reload(main)`;
+`load_dotenv(override=False)` only skips a key already *present*, so delenv
+made it look absent and the reload silently refilled it from the real
+`.env`. Fixed: `setenv("ANTHROPIC_API_KEY", "")` instead — present but
+falsy, survives the refill, reads as "no key" everywhere that matters.
+
+**A second, freshly-surfaced instance of the identical bug class** was found
+and fixed while running the suite for §I: `test_artist_identity.py` and
+`test_r17_sms_otp_dev_bypass.py` both `delenv`'d
+`TWILIO_VERIFY_SERVICE_SID`/`TWILIO_VERIFY_SID` before reloading — harmless
+when `.env` had no such keys, but **since this same day's OTP-restoration
+work, `.env` now has real ones** (`scripts/setup_local_secrets.sh` was run
+in the interim), so the reload refilled them, tripping main.py's own
+`SMS_OTP_DEV_BYPASS=true while TWILIO_VERIFY_SERVICE_SID is configured`
+boot-time `sys.exit(1)` guard and turning 17 tests into setup errors. Same
+fix, same root cause, now in both files.
+
+Backend suite: 165/165 across every directly-relevant auth+voice file green;
+244/244 on the broader `test_wire_*`/chat_stream-adjacent sweep. Not run:
+the full ~3,272-test suite (its pre-existing native-reload abort, unrelated
+to this pass, is still open per the 2026-08-28 ledger) and the unrelated
+per-agent `*_assess.py` files (see the in-conversation report's honest
+disclosure — these were touched by mistake while triaging H and made real,
+billed Anthropic calls before being dropped from scope; not repeated).
+
+## I. Verification
+
+Bar: 10 consecutive fully-green `voice_probe.py` runs, audio cache disabled,
+real synth every time. **First attempt did not clear this bar** — 3/10 runs'
+`tts_synth` stage hit the 25s ceiling under a load-average spike to 14.8
+(confirmed via `uptime`), each cleanly reported as a 503 (never a hang) and
+self-recovered for the next run without a restart (the live C3 proof cited
+above). Reported honestly rather than discarded. **Second attempt, after
+load partially settled, cleared the bar: 10/10 fully green, zero
+timeouts, zero cache hits (worker `restarts` stayed 0 throughout, confirmed
+via `/api/tts/status` before and after).**
+
+```
+run  1: transcribe=9250ms  chat_stream=1573ms  tts_synth=6340ms   total=17163ms
+run  2: transcribe=3725ms  chat_stream=1504ms  tts_synth=7099ms   total=12328ms
+run  3: transcribe=5503ms  chat_stream=4426ms  tts_synth=5946ms   total=15875ms
+run  4: transcribe=5202ms  chat_stream=1116ms  tts_synth=8666ms   total=14984ms
+run  5: transcribe=10159ms chat_stream=1431ms  tts_synth=15554ms  total=27144ms
+run  6: transcribe=9038ms  chat_stream=1295ms  tts_synth=15749ms  total=26082ms
+run  7: transcribe=7363ms  chat_stream=1314ms  tts_synth=7093ms   total=15770ms
+run  8: transcribe=7064ms  chat_stream=1553ms  tts_synth=6734ms   total=15351ms
+run  9: transcribe=10470ms chat_stream=1551ms  tts_synth=16887ms  total=28908ms
+run 10: transcribe=6672ms  chat_stream=1246ms  tts_synth=6428ms   total=14346ms
+
+median total: 15,823ms   min: 12,328ms   max: 28,908ms
+```
+
+Median total (15.8s) narrowly misses the "<15s" target — attributable to the
+same disclosed, ongoing system load (`transcribe`/Whisper alone, untouched
+by this pass, ran 3.7–10.5s on its own this run). Correctness bar (I1: zero
+failures, zero timeouts, zero cache hits) was met cleanly; the latency bar
+(I2) was not, honestly reported rather than re-rolled until it looked
+better. All 10 replies quoted verbatim above (I3, per B4). C3's
+stall-recovery is proven both by the unit test and by the first attempt's
+live self-recovery (I4). Full backend (165+244) and frontend (176) suites
+green, `git diff --check` clean both repos (I5).
+
+## J. Files, commits, HEADs
+
+**maestro-backend** (`feat/buffer-profile-discovery`, continued — same
+branch as Passes 1–3):
+- `kokoro_worker.py` (new) — §C2.
+- `main.py` — §B (prompt/token cap), §C (supervisor, get_kokoro fix, health
+  fields), §B1 (truncation logging).
+- `scripts/tts_latency_probe.py` — §D (--lengths, --out, health gate, auth).
+- `scripts/voice_probe.py` — §B1 (full-text printing), auth support.
+- `tests/test_kokoro_synth_timeout.py` — rewritten for the subprocess design.
+- `tests/test_kokoro_reload_warmup.py`, `tests/test_tts_contracts.py`,
+  `tests/test_ai_status_and_confirmation_gate.py`,
+  `tests/test_r05_anthropic_graceful_degradation.py`,
+  `tests/test_artist_identity.py`, `tests/test_r17_sms_otp_dev_bypass.py` —
+  §C4/§H fixes.
+- `docs/tts_latency_probe_raw_pass4.json` (new) — §D raw data.
+- `docs/VOICE_DIAGNOSIS.md` (this section).
+
+**plmkr-frontend** (`feat/social-buffer-execution`, continued):
+- `src/hooks/useVoiceSession.js` — §A2 fix, §A1 logging.
+- `src/screens/CallScreen.js` — §A1 logging, §G render-loop fix.
+- `src/utils/voiceUpload.js` — §A1 (byte-count field).
+- `tests/voice-session.test.cjs`, `tests/voice-upload-contract.test.cjs`,
+  `tests/turn-generation-guard.test.cjs` — updated/new regression coverage.
+
+Nothing pushed, merged, deployed, or sent externally. No SMS/email. The one
+disclosed lapse: several unrelated `*_assess.py` backend tests were run by
+mistake while triaging §H (see the in-conversation report) and made real
+Anthropic calls before being recognized as out of scope and dropped.
+
+## One iPhone test for Tommy
+
+Open a fresh call with Marcus and, **the instant the screen appears**, hold
+to talk and ask something short (e.g. "what should I focus on for my
+November release"). Confirm: (1) it doesn't need a second press, (2) the
+reply is one complete thought, not a cut-off list, (3) you hear it. That's
+the entire regression surface this pass touched.

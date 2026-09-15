@@ -20,7 +20,11 @@ def _load_app(monkeypatch, *, with_key: bool, tmp_path):
     if with_key:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     else:
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        # Pass 4 (VOICE_DIAGNOSIS.md §H) — same fix as
+        # test_ai_status_and_confirmation_gate.py's _load_main: setenv("")
+        # survives the reload-triggered load_dotenv(override=False) refill;
+        # delenv does not. See that file for the full explanation.
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     monkeypatch.setenv("DB_PATH",         str(tmp_path / "test.db"))
     monkeypatch.setenv("DATABASE_URL",    "")
     monkeypatch.setenv("AUDIO_CACHE_DIR", str(tmp_path / "audio_cache"))

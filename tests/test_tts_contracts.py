@@ -23,7 +23,10 @@ def test_tts_status_shape(tts_client):
     client, _ = tts_client
     response = client.get("/api/tts/status")
     assert response.status_code == 200
-    assert set(response.json()) == {"ready", "engine"}
+    # Pass 4 (VOICE_DIAGNOSIS.md §C4): "worker"/"wedged" added so /api/tts/status
+    # can expose whether the Kokoro synth subprocess is wedged, without
+    # blocking behind it if it is — see _SupervisedSubprocessWorker.status().
+    assert set(response.json()) == {"ready", "engine", "worker", "wedged"}
 
 
 def test_tts_synth_success_shape(tts_client, monkeypatch):

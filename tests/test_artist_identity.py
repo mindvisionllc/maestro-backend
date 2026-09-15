@@ -26,8 +26,14 @@ def identity_client(monkeypatch, tmp_path):
     monkeypatch.setenv("PLMKR_SESSION_SECRET", SESSION_SECRET)
     monkeypatch.setenv("PLMKR_IDENTITY_SECRET", IDENTITY_SECRET)
     monkeypatch.setenv("SMS_OTP_DEV_BYPASS", "true")
-    monkeypatch.delenv("TWILIO_VERIFY_SERVICE_SID", raising=False)
-    monkeypatch.delenv("TWILIO_VERIFY_SID", raising=False)
+    # Pass 4 (VOICE_DIAGNOSIS.md §H): setenv("") not delenv — see
+    # test_r17_sms_otp_dev_bypass.py's matching comment. delenv here made
+    # importlib.reload(main) below silently refill these from the real .env
+    # (which now has real Twilio values via scripts/setup_local_secrets.sh),
+    # tripping main.py's own "SMS_OTP_DEV_BYPASS=true while
+    # TWILIO_VERIFY_SERVICE_SID is configured" boot-time sys.exit(1) guard.
+    monkeypatch.setenv("TWILIO_VERIFY_SERVICE_SID", "")
+    monkeypatch.setenv("TWILIO_VERIFY_SID", "")
     monkeypatch.setenv("PLMKR_OTP_SEND_COOLDOWN_SECONDS", "0")
     monkeypatch.setenv("PLMKR_OTP_MAX_SENDS_PER_WINDOW", "100")
     monkeypatch.delenv("RAILWAY_ENVIRONMENT", raising=False)

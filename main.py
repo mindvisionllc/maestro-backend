@@ -11,6 +11,9 @@ import random
 import tempfile
 import asyncio
 import threading
+import multiprocessing
+import queue as _stdlib_queue
+import atexit
 import hashlib
 import sqlite3
 from pathlib import Path
@@ -119,11 +122,17 @@ KOKORO_SYNTH_TIMEOUT_SECONDS = float(os.environ.get("KOKORO_SYNTH_TIMEOUT_SECOND
 # keeps every observed voice reply's median comfortably under the 8s bar with
 # margin. See docs/VOICE_DIAGNOSIS.md Pass 3 §1 for the full data.
 VOICE_CHAR_CEILING = int(os.environ.get("VOICE_CHAR_CEILING", "130"))
-# Generous enough that a prompt-compliant ~130-char reply is never cut mid-
-# sentence by max_tokens itself (that job belongs to the sentence-aware
-# VOICE_CHAR_CEILING truncation above) — this just bounds worst-case
-# generation time/cost if the model ignores the brevity instruction.
-VOICE_MAX_TOKENS = int(os.environ.get("VOICE_MAX_TOKENS", "90"))
+# Pass 4 (VOICE_DIAGNOSIS.md §B3): must be generous enough that Marcus always
+# FINISHES the sentence he starts — max_tokens cutting generation off
+# mid-thought must never be how a voice reply ends. Shortness is the prompt's
+# job (§_VOICE_RULES); VOICE_CHAR_CEILING above is the sentence-aware backstop
+# that trims an over-long-but-complete reply for TTS synth time. This just
+# has to sit comfortably above whatever a real (occasionally
+# prompt-non-compliant) reply could need to finish its own sentence — 220
+# tokens is ~850-900 chars of English, well past any VOICE_CHAR_CEILING this
+# pass considered (see §F), so it should essentially never be what actually
+# stops generation.
+VOICE_MAX_TOKENS = int(os.environ.get("VOICE_MAX_TOKENS", "220"))
 
 # Bounds the Anthropic call(s) inside /api/chat_stream. Both must stay comfortably
 # under the frontend's 60s SSE inactivity watchdog (see streamChat's WATCHDOG_MS in
@@ -527,11 +536,11 @@ Quinn — PR Manager | Avery — Booking Agent | Riley — Social Media Manager
 # mechanism, so a compliant reply is never truncated mid-sentence.
 _VOICE_RULES = _RULES_SHARED + """
 VOICE MODE — you are speaking live on a phone call, not writing.
-Answer in ONE to TWO short spoken sentences — about 20 words, roughly 130 characters total. Be sharp. Be complete. Then stop.
-If you need more information, ask exactly ONE short question — never a colon followed by a list of sub-questions ("what date, what venue, what budget?"). One question, one clean sentence, end with a period or question mark.
+Give ONE complete thought, OR ask ONE question. Never both, never more than one of either. About 20 words, roughly 130 characters. Be sharp. Be complete. Then stop.
+NO ENUMERATIONS. Never "I need three things," "a few things," "a couple of questions," or any count-then-list structure — even a short one. If you're tempted to list sub-questions, that means you're asking more than one question: pick the single most important one and ask only that. The artist can always be asked a second question on their next turn.
+If you need more information, ask exactly ONE short question — one clean sentence, end with a question mark. Never a colon followed by a list of sub-questions ("what date, what venue, what budget?").
 ZERO markdown. No asterisks, bullets, dashes, numbers, headers — plain spoken sentences only.
-Convert every list to flowing speech: "First... and critically... what you need to know is..."
-The artist asks follow-up questions to go deeper. Give the sharp answer, then stop talking.
+The artist asks follow-up questions to go deeper. Give the one sharp thought or the one question, then stop talking — do not preview what you'll ask next.
 """
 
 # Text mode: full markdown, longer analysis allowed
@@ -708,16 +717,153 @@ _kokoro = globals().get("_kokoro")
 _kokoro_available = globals().get("_kokoro_available")
 _kokoro_warmup_thread = globals().get("_kokoro_warmup_thread")
 _tts_lock = asyncio.Lock()
-# True mutual exclusion around the native kokoro.create() call, held by whichever
-# worker thread is actually running it. _tts_lock above only bounds how long an
-# asyncio caller waits (see KOKORO_SYNTH_TIMEOUT_SECONDS below); a caller that
-# gives up on timeout does NOT stop its worker thread — Python cannot safely
-# interrupt a running native call — so without this a second synth could start
-# concurrently against the same shared (not known to be thread-safe) Kokoro
-# model. Acquiring this lock inside the worker thread, independent of the
-# asyncio-level timeout, prevents that; a late-finishing orphaned call just
-# queues behind whichever call currently holds it.
-_kokoro_native_lock = threading.Lock()
+
+# ── Supervised subprocess worker for the actual native synth call ─────────────
+# VOICE_DIAGNOSIS.md §C (Pass 4): the native kokoro.create() call used to run
+# in a thread-pool worker thread, protected by a plain threading.Lock
+# (_kokoro_native_lock, removed here). When that native call stalled,
+# asyncio.wait_for's timeout only released the *asyncio caller* — it cannot
+# stop the underlying OS thread (Python cannot safely interrupt a running
+# native call on a thread), so the thread kept running forever, still holding
+# the lock. Every later call then blocked on that same lock inside its own
+# executor thread, and from the asyncio side that looked identical to a fresh
+# 25.0s timeout, forever, until the whole backend was restarted — there was no
+# way to tell "still legitimately running" apart from "permanently stuck",
+# and no way to reclaim the lock either way.
+#
+# A *process*, unlike a thread, can be killed outright, and killing it
+# destroys every lock/mutex/native state it held — there is nothing left to
+# leak into the next call. That is why this is a subprocess, not a lock with
+# a liveness check: no liveness check can ever be as certain as "the process
+# that held it no longer exists". kokoro_worker.py has the child-side loop;
+# this class supervises it (spawn, submit a job, detect a stall via a real
+# OS-level queue timeout — not a threading.Lock — and kill+respawn on stall).
+class _SupervisedSubprocessWorker:
+    def __init__(self, target, init_args=()):
+        self._target = target
+        self._init_args = init_args
+        self._proc = None
+        self._req_q = None
+        self._resp_q = None
+        self._lock = threading.Lock()  # serializes spawn/submit/kill; see class docstring
+        self.restarts = 0
+        self._busy_since = None  # plain attr, not lock-guarded on purpose — see status()
+
+    def _spawn_locked(self):
+        ctx = multiprocessing.get_context("spawn")  # spawn, not fork: a clean child
+        self._req_q = ctx.Queue()                    # with no inherited event loop,
+        self._resp_q = ctx.Queue()                    # threads, or partially-loaded
+        self._proc = ctx.Process(                      # native state.
+            target=self._target,
+            args=(*self._init_args, self._req_q, self._resp_q),
+            daemon=True,
+            name="kokoro-worker",
+        )
+        self._proc.start()
+
+    def _kill_locked(self):
+        if self._proc is not None:
+            self._proc.terminate()
+            self._proc.join(timeout=2)
+            if self._proc.is_alive():
+                self._proc.kill()
+                self._proc.join(timeout=2)
+            self.restarts += 1
+        self._proc = None
+        self._req_q = None
+        self._resp_q = None
+
+    def warm(self, timeout: float = 60.0) -> bool:
+        """Spawn (if needed) and block until the model has loaded, or died."""
+        with self._lock:
+            if self._proc is None or not self._proc.is_alive():
+                self._spawn_locked()
+            try:
+                job_id, ok, payload = self._resp_q.get(timeout=timeout)
+            except _stdlib_queue.Empty:
+                self._kill_locked()
+                return False
+            if job_id != "__ready__" or not ok:
+                self._kill_locked()
+                return False
+            return True
+
+    def status(self) -> dict:
+        """Deliberately does NOT acquire self._lock — synth_blocking() holds
+        it for up to `timeout` seconds (the whole point of C4 is to be able
+        to observe wedge state *while* a call is stalled, so this must never
+        block behind that). Reads are best-effort/racy by a few instructions
+        at worst, which is fine for a diagnostic signal, never used for a
+        correctness decision."""
+        proc = self._proc
+        alive = proc is not None and proc.is_alive()
+        busy_since = self._busy_since
+        busy_seconds = (time.monotonic() - busy_since) if busy_since is not None else None
+        return {
+            "alive": alive,
+            "restarts": self.restarts,
+            "busy_seconds": round(busy_seconds, 1) if busy_seconds is not None else None,
+        }
+
+    def synth_blocking(self, text: str, voice: str, speed: float, lang: str, timeout: float):
+        """Blocking — call via loop.run_in_executor from async code, never
+        directly on the event loop. Returns (samples, sample_rate) or raises
+        TimeoutError / RuntimeError. On any failure the worker is killed so
+        the NEXT call gets a fresh, unpoisoned process instead of queueing
+        behind one that will never answer.
+
+        Holds self._lock for the whole call, including the blocking queue
+        waits — not just the spawn/kill bookkeeping. This is deliberate: two
+        callers (e.g. the warmup thread and a real request racing it) reading
+        the same _resp_q without exclusion could each receive the *other's*
+        message (queue.get() has no notion of "which caller asked for what"),
+        which would make a perfectly healthy response look like a stale one
+        and trigger a needless kill. Serializing here is the simplest way to
+        rule that out entirely; status() above is exempt for the reason
+        given in its own docstring."""
+        with self._lock:
+            self._busy_since = time.monotonic()
+            try:
+                if self._proc is None or not self._proc.is_alive():
+                    self._spawn_locked()
+                    try:
+                        ready_id, ok, payload = self._resp_q.get(timeout=timeout)
+                    except _stdlib_queue.Empty:
+                        self._kill_locked()
+                        raise TimeoutError("kokoro worker did not become ready in time")
+                    if ready_id != "__ready__" or not ok:
+                        self._kill_locked()
+                        raise RuntimeError(f"kokoro worker failed to load: {payload}")
+
+                job_id = uuid.uuid4().hex
+                self._req_q.put((job_id, text, voice, speed, lang))
+                try:
+                    resp_id, ok, payload = self._resp_q.get(timeout=timeout)
+                except _stdlib_queue.Empty:
+                    self._kill_locked()
+                    raise TimeoutError("kokoro synth stalled")
+                if resp_id != job_id:
+                    # A stray/late response — the queue's state is no longer
+                    # trustworthy for this or any future call. Restart clean.
+                    self._kill_locked()
+                    raise TimeoutError("kokoro worker returned a stale response")
+                if not ok:
+                    raise RuntimeError(payload)
+                return payload  # (samples, sr)
+            finally:
+                self._busy_since = None
+
+
+import kokoro_worker as _kokoro_worker_module
+_kokoro_worker_supervisor = globals().get("_kokoro_worker_supervisor") or _SupervisedSubprocessWorker(
+    target=_kokoro_worker_module.run,
+    init_args=(str(_BASE / "kokoro-v1.0.onnx"), str(_BASE / "voices-v1.0.bin")),
+)
+# Without this, a killed/restarted backend can orphan a live worker subprocess
+# (confirmed during this pass's own measurement — it doesn't auto-exit with
+# its parent on every shutdown path even as a daemon process), which then
+# just sits there holding a full Kokoro model in memory for nothing.
+atexit.register(_kokoro_worker_supervisor._kill_locked)
 
 def get_kokoro():
     global _kokoro, _kokoro_available
@@ -742,13 +888,33 @@ def get_kokoro():
             return None
         try:
             from kokoro_onnx import Kokoro
-            _kokoro = Kokoro(str(onnx_path), str(voices_path))
+            probe = Kokoro(str(onnx_path), str(voices_path))
+            # Pass 4 (VOICE_DIAGNOSIS.md §D): this instance is used only to
+            # confirm the model actually constructs (surfacing a real load
+            # failure here, once, at warmup, instead of on an artist's first
+            # turn) — real synthesis runs entirely in
+            # _kokoro_worker_supervisor's own subprocess (main.py §C), which
+            # loads its own independent model. Keeping THIS one alive too, in
+            # the parent process, for the rest of the process's life, doubled
+            # onnxruntime's thread pool and RSS on an already memory-
+            # constrained box (`free -h` showed active swap at measurement
+            # time) for zero benefit — every real /api/tts/synth call
+            # measurably slowed (5-7s -> 15-17s+ at the same text length,
+            # confirmed by re-running §D's probe with vs. without this change)
+            # and the worker even destabilized (spurious kills once contention
+            # pushed a legitimate call past KOKORO_SYNTH_TIMEOUT_SECONDS).
+            # Dropping the reference here frees it as soon as this function
+            # returns; nothing else in this process ever holds a real model.
+            del probe
             _kokoro_available = True
             log.info("tts_kokoro_ready", extra={"event": "tts_kokoro_ready"})
         except Exception as e:
             log.error("tts_kokoro_error", extra={"event": "tts_kokoro_error", "error": str(e)})
             _kokoro_available = False
-    return _kokoro if _kokoro_available else None
+    # Callers only ever check truthiness (see synthesize_speech()) — _kokoro
+    # itself is intentionally never populated with a real model anymore (see
+    # the comment above); this stays a plain bool/None sentinel.
+    return _kokoro_available if _kokoro_available else None
 
 async def synthesize_speech(text: str, voice: str, call_id: str = "") -> Optional[bytes]:
     """Synthesize text → WAV bytes. Uses Kokoro locally, ElevenLabs on cloud."""
@@ -769,25 +935,24 @@ async def synthesize_speech(text: str, voice: str, call_id: str = "") -> Optiona
             import soundfile as sf
             loop = asyncio.get_event_loop()
 
-            def _synth():
-                # See _kokoro_native_lock above: protects the native call even
-                # after the asyncio-level timeout below gives up and moves on.
-                with _kokoro_native_lock:
-                    return kokoro.create(text, voice=voice, speed=1.1, lang="en-us")
-
-            worker = loop.run_in_executor(None, _synth)
+            # VOICE_DIAGNOSIS.md §C (Pass 4): the actual native call runs in
+            # _kokoro_worker_supervisor's subprocess, not a thread — see that
+            # class's docstring for why. synth_blocking() is itself bounded by
+            # a real OS-level queue timeout and kills+respawns the worker on
+            # stall, so (unlike the old thread-pool version) no outer
+            # asyncio.wait_for/shield is needed to protect this caller: the
+            # bound is enforced by the same primitive that actually recovers.
             try:
-                # shield: a timeout must stop this caller from waiting, not the
-                # worker thread, which cannot be safely interrupted mid-call —
-                # same pattern as the /api/transcribe Whisper timeout above.
-                samples, sr = await asyncio.wait_for(
-                    asyncio.shield(worker), timeout=KOKORO_SYNTH_TIMEOUT_SECONDS,
+                samples, sr = await loop.run_in_executor(
+                    None, _kokoro_worker_supervisor.synth_blocking,
+                    text, voice, 1.1, "en-us", KOKORO_SYNTH_TIMEOUT_SECONDS,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 log.error("tts_kokoro_synth_timeout", extra={
                     "event": "tts_kokoro_synth_timeout",
                     "call_id": call_id,
                     "timeout_seconds": KOKORO_SYNTH_TIMEOUT_SECONDS,
+                    "worker_restarts": _kokoro_worker_supervisor.restarts,
                 })
                 return None
 
@@ -1056,7 +1221,7 @@ def _truncate_at_sentence(text: str, ceiling: int) -> str:
     return (window.rsplit(" ", 1)[0] if " " in window else window).rstrip()
 
 
-async def _enforce_voice_char_ceiling(gen, ceiling: int):
+async def _enforce_voice_char_ceiling(gen, ceiling: int, turn_id: str = ""):
     """Wrap a chat_stream SSE generator (any agent's — this sits after every
     generate_*/generate() path converges, so it is one choke point instead of
     touching ~40 duplicated generators) so a voice turn's spoken reply never
@@ -1101,7 +1266,24 @@ async def _enforce_voice_char_ceiling(gen, ceiling: int):
         elif etype == "done":
             full_text = payload.get("full_text", "")
             if len(full_text) > ceiling:
-                payload["full_text"] = _truncate_at_sentence(full_text, ceiling)
+                truncated = _truncate_at_sentence(full_text, ceiling)
+                # Pass 4 (VOICE_DIAGNOSIS.md §B1): the raw (pre-truncation) model
+                # output alongside what actually reached TTS — the evidence for
+                # whether a given reply was cut by generation length (max_tokens
+                # stopping the model mid-thought — that shows up here as `raw`
+                # itself already looking cut off, no ceiling involved) versus by
+                # this server-side ceiling (the common, expected case: `raw` is
+                # a complete, well-formed sentence/thought, just longer than
+                # `ceiling`). Logs the full raw text, not a length only, so this
+                # never has to be re-derived from a probe script's own display
+                # truncation again (see voice_probe.py's Pass 4 fix, same bug).
+                log.info("voice_reply_truncated", extra={
+                    "event": "voice_reply_truncated", "turn_id": turn_id,
+                    "ceiling": ceiling, "raw_chars": len(full_text),
+                    "truncated_chars": len(truncated), "raw_text": full_text,
+                    "truncated_text": truncated,
+                })
+                payload["full_text"] = truncated
             yield sse(payload)
         else:
             yield chunk
@@ -1629,9 +1811,19 @@ def _init_pg_connection(database_url: str) -> str:
 # first request arrives (avoids the 20-35s first-call warmup delay).
 _ensure_db()
 DATABASE_URL = _init_pg_connection(DATABASE_URL)
+def _warmup_kokoro_and_worker():
+    """Warms both Kokoro subsystems: get_kokoro() (in-process, availability/
+    R-19-warning check only — see main.py's Kokoro section docstring) and
+    _kokoro_worker_supervisor's subprocess (the one that actually serves
+    synthesis requests — VOICE_DIAGNOSIS.md §C). Only warms the worker if
+    get_kokoro() found the model files at all; ElevenLabs-fallback deploys
+    (e.g. Railway, where the .onnx/.bin files are excluded) never spawn it."""
+    if get_kokoro() is not None:
+        _kokoro_worker_supervisor.warm(timeout=60)
+
 if _kokoro_warmup_thread is None or not _kokoro_warmup_thread.is_alive():
     _kokoro_warmup_thread = _threading.Thread(
-        target=get_kokoro,
+        target=_warmup_kokoro_and_worker,
         daemon=True,
         name="kokoro-warmup",
     )
@@ -13698,7 +13890,7 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
         _stream_gen = generate
     gen_iter = _stream_gen()
     if is_voice_turn:
-        gen_iter = _enforce_voice_char_ceiling(gen_iter, VOICE_CHAR_CEILING)
+        gen_iter = _enforce_voice_char_ceiling(gen_iter, VOICE_CHAR_CEILING, turn_id=turn_id)
     return StreamingResponse(
         gen_iter,
         media_type="text/event-stream",
@@ -13798,12 +13990,30 @@ async def tts_synth(req: TtsSynthRequest, request: Request):
     _stage_log(turn_id, "tts_done", t0, outcome="failed", detail=str(detail))
     return JSONResponse({"audio": None, "error": "TTS unavailable", "detail": detail}, status_code=503)
 
+def _tts_worker_wedged(worker_status: dict) -> bool:
+    """VOICE_DIAGNOSIS.md §C4: a call still legitimately in flight and one
+    that will never return look identical from the outside until the
+    KOKORO_SYNTH_TIMEOUT_SECONDS bound actually fires (at which point
+    _SupervisedSubprocessWorker kills+respawns it on its own — see that
+    class). So "wedged" here means "suspiciously close to that bound right
+    now", not "confirmed stuck" — a fast, honest, best-effort signal, not a
+    guarantee. `restarts` (in the same status dict) is the confirmed-stall
+    counter: any value >0 means this has happened at least once since boot."""
+    busy_seconds = worker_status.get("busy_seconds")
+    return busy_seconds is not None and busy_seconds > KOKORO_SYNTH_TIMEOUT_SECONDS * 0.9
+
 @app.get("/api/tts/status")
 async def tts_status():
     """Returns whether TTS is ready. True if Kokoro loaded OR ElevenLabs key present."""
-    kokoro_ready = _kokoro_available is True
-    el_ready     = bool(ELEVENLABS_API_KEY)
-    return {"ready": kokoro_ready or el_ready, "engine": "kokoro" if kokoro_ready else ("elevenlabs" if el_ready else "none")}
+    kokoro_ready   = _kokoro_available is True
+    el_ready       = bool(ELEVENLABS_API_KEY)
+    worker_status  = _kokoro_worker_supervisor.status()
+    return {
+        "ready": kokoro_ready or el_ready,
+        "engine": "kokoro" if kokoro_ready else ("elevenlabs" if el_ready else "none"),
+        "worker": worker_status,
+        "wedged": _tts_worker_wedged(worker_status),
+    }
 
 @app.get("/api/health")
 async def api_health():
@@ -13815,9 +14025,15 @@ async def api_health():
     # only, same as _check_env()'s own boot check — a malformed-but-present
     # key still reports available here and only surfaces on the first real
     # Anthropic call (see chat_stream's own error path).
+    worker_status = _kokoro_worker_supervisor.status() if tts_engine == "kokoro" else {}
     return {
         "status": "ok", "version": "2.2.1", "tts": tts_engine, "agents": len(AGENTS),
         "ai_available": ANTHROPIC_AVAILABLE,
+        # C4: whether the Kokoro synth worker is currently wedged (see
+        # _tts_worker_wedged docstring) and how many times it's had to be
+        # killed+respawned since boot (0 = never stalled this process).
+        "tts_wedged": _tts_worker_wedged(worker_status) if tts_engine == "kokoro" else False,
+        "tts_worker_restarts": worker_status.get("restarts", 0) if tts_engine == "kokoro" else 0,
     }
 
 app.mount("/static", StaticFiles(directory=str(_BASE / "static"), html=True), name="static")
